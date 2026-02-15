@@ -8,9 +8,16 @@ echo ""
 
 # 1. Uninstall the python package
 echo "⚙️  Uninstalling Nova CLI package..."
-python3 -m pip uninstall -y nova-cli || echo "⚠️  Package nova-cli not found or already uninstalled."
+# Use --break-system-packages for Ubuntu 24.04+ compatibility
+python3 -m pip uninstall -y nova-cli --break-system-packages || echo "⚠️  Pip uninstall failed or package not found."
 
-# 2. Ask to delete the config folder (~/.nova)
+# 2. Cleanup entry point if pip missed it
+if [ -f "$HOME/.local/bin/nova" ]; then
+    rm "$HOME/.local/bin/nova"
+    echo "✅ Removed entry point script."
+fi
+
+# 3. Ask to delete the config folder (~/.nova)
 CONFIG_DIR="$HOME/.nova"
 if [ -d "$CONFIG_DIR" ]; then
     read -p "❓ Delete configuration and secrets folder? ($CONFIG_DIR) [y/N]: " del_config
