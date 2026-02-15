@@ -808,11 +808,27 @@ def cmd_reload():
     """nova reload — Instruction to refresh shell."""
     shell = os.path.basename(os.environ.get("SHELL", "bash"))
     rc_file = "~/.bashrc" if "bash" in shell else "~/.zshrc"
+    cmd = f"source {rc_file}"
     
+    # Try to copy to clipboard (WSL specific)
+    copied = False
+    try:
+        subprocess.run(f'echo "{cmd}" | clip.exe', shell=True, check=True, stderr=subprocess.DEVNULL)
+        copied = True
+    except:
+        pass
+
     print(f"\n  {C.BLUE}{C.BOLD}🔄 Refresh Terminal Session{C.RESET}")
     print(f"  {C.DIM}Your shell configuration has changed.{C.RESET}\n")
-    print(f"  {C.YELLOW}Please run:{C.RESET}")
-    print(f"  {C.BOLD}{C.CYAN}source {rc_file}{C.RESET}\n")
+    
+    if copied:
+        print(f"  {C.GREEN}📋 Command copied to clipboard!{C.RESET}")
+        print(f"  Just paste (Ctrl+V or Right-click) and hit Enter.\n")
+    else:
+        print(f"  {C.YELLOW}Please run:{C.RESET}")
+        print(f"  {C.BOLD}{C.CYAN}{cmd}{C.RESET}\n")
+
+    print(f"  {C.DIM}Tip: You can now use the shortcut:{C.RESET} {C.BOLD}nova-r{C.RESET}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

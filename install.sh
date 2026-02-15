@@ -36,10 +36,11 @@ if [[ ":$PATH:" != *":$LOCAL_BIN:"* ]]; then
     echo "" >> "$HOME/.bashrc"
     echo "# Nova CLI Path" >> "$HOME/.bashrc"
     echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> "$HOME/.bashrc"
+    echo "alias nova-r='source ~/.bashrc'" >> "$HOME/.bashrc"
     
     # Export for the current session
     export PATH="$HOME/.local/bin:$PATH"
-    echo "✅ PATH updated. Please run 'source ~/.bashrc' if 'nova' is not found."
+    echo "✅ PATH and 'nova-r' alias added. Please run 'source ~/.bashrc' if 'nova' is not found."
 else
     echo "✅ PATH is already configured."
 fi
