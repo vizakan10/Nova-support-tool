@@ -17,12 +17,20 @@
 
 ## Quick Install
 
+### Method A: Direct (One-liner)
 ```bash
 # In WSL / Linux terminal
 pip install --user git+https://github.com/vizakan10/Nova-support-tool.git
-
-# First-time setup (interactive wizard)
 nova setup
+```
+
+### Method B: Clone & Install (Recommended for WSL)
+If you want to keep the source code or if `pip` is missing:
+```bash
+git clone https://github.com/vizakan10/Nova-support-tool.git
+cd Nova-support-tool
+chmod +x install.sh
+./install.sh
 ```
 
 ## All Commands
