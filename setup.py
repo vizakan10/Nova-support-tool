@@ -1,22 +1,26 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="viza-wsl",
-    version="1.0.0",
-    description="WSL Terminal Error Capture Tool",
-    author="Your Name",
-    author_email="your.email@example.com",
-    packages=find_packages(),
-    py_modules=['wsl_terminal_reader'],
+    name="nova-cli",
+    version="2.0.0",
+    description="Nova CLI — support tool for collaborative error resolution",
+    author="IFS",
+    py_modules=["nova", "config", "kb_manager"],
     entry_points={
-        'console_scripts': [
-            'viza=wsl_terminal_reader:main',
+        "console_scripts": [
+            "nova=nova:main",
         ],
     },
-    install_requires=[],
-    python_requires='>=3.6',
+    install_requires=[
+        "questionary>=2.0.0",
+    ],
+    python_requires=">=3.8",
+    include_package_data=True,
+    package_data={"": ["kb.json"]},
     classifiers=[
         "Programming Language :: Python :: 3",
         "Operating System :: POSIX :: Linux",
+        "Environment :: Console",
+        "Topic :: Software Development :: Debuggers",
     ],
 )

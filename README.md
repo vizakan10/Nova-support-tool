@@ -1,107 +1,181 @@
-# Viza - WSL Terminal Error Capture Tool
+# Nova CLI — Framework Reliability Agent
 
-Capture and analyze terminal errors in WSL Ubuntu with a single command.
-
-## Quick Install
-
-### Option 1: Direct Install (Recommended)
-```bash
-# In WSL Ubuntu terminal
-pip install --user git+https://github.com/yourusername/viza-wsl.git
-```
-
-### Option 2: From Downloaded Files
-```bash
-# Download and extract the package, then:
-cd viza-wsl
-pip install --user .
-```
-
-### Option 3: Development Mode
-```bash
-cd viza-wsl
-pip install --user -e .
-```
-
-After installation, the `viza` command is available globally!
-
-## Usage
-
-### Capture Last Command Error
-```bash
-$ python3 script.py
-Error: No such file or directory
-
-$ viza up
-✓ Error captured and saved to viza_context.txt!
-```
-
-### View Logs
-```bash
-$ viza log        # Last 5 entries
-$ viza log 10     # Last 10 entries
-```
-
-### Get Help
-```bash
-$ viza help
-```
-
-## Example
-
-```bash
-# Try to run a command
-$ python3 myapp.py
-python3: command not found
-
-# Capture it
-$ viza up
-📋 Capturing last terminal activity...
-
-✓ Command: python3 myapp.py
-✓ Success: No
-✓ Return Code: 127
-✓ Error Type: File Not Found
-
---- Error Output ---
-bash: python3: command not found
-
-✓ Full context saved to viza_context.txt
-```
-
-## What Gets Created
-
-- `viza_context.txt` - Last error context (ready for LLM analysis)
-- `wsl_terminal.log` - Full command history
-
-## Uninstall
-
-```bash
-pip uninstall viza-wsl
-```
-
-## For Distribution
-
-### As GitHub Repository
-1. Push to GitHub
-2. Users install: `pip install --user git+https://github.com/yourusername/viza-wsl.git`
-
-### As ZIP Package
-1. Zip the entire folder
-2. Users extract and run: `pip install --user .`
-3. Done! `viza` command works everywhere
-
-## Requirements
-
-- WSL Ubuntu (or any Linux)
-- Python 3.6+
-- pip (usually pre-installed)
+> Collaborative error resolution for development teams.  
+> Search a shared Knowledge Base → AI fallback → zero-friction fixes.
 
 ## How It Works
 
-1. Captures the last command from bash history
-2. Re-executes it to get output and errors
-3. Analyzes error types
-4. Saves clean context for debugging or LLM analysis
+```
+  Error occurs → nova up → Search KB → Show fix
+                               ↓ (no match)
+                         AI suggests fix → Save to KB for the team
+```
 
-No continuous monitoring, no background processes - just simple command execution when you need it!
+- **Knowledge Base** (`kb.json`) lives on SharePoint, synced via OneDrive
+- **Tool** installed via pip from GitHub
+- **No accounts, no dashboards** — just a CLI command
+
+## Quick Install
+
+```bash
+# In WSL / Linux terminal
+pip install --user git+https://github.com/vizakan10/Nova-support-tool.git
+
+# First-time setup (interactive wizard)
+nova setup
+```
+
+## All Commands
+
+### Error Resolution
+| Command | Description |
+|---------|-------------|
+| `nova up` | Capture error → search KB → AI fallback |
+| `nova add` | Save a new error solution to the KB |
+
+### AI Provider Management
+| Command | Description |
+|---------|-------------|
+| `nova add-llm` | Add a new AI provider (with nickname) |
+| `nova rm <provider>` | Remove an AI provider |
+| `nova use <provider>` | Switch active AI provider |
+| `nova lp` | List all configured AI providers |
+| `nova cur` | Show current active provider |
+| `nova test [provider]` | Test connection to a provider |
+
+### Configuration
+| Command | Description |
+|---------|-------------|
+| `nova setup` | First-time config (KB path + AI) |
+| `nova version` | Show version info |
+| `nova secrets-path` | Show secrets file location |
+| `nova help` | Show help message |
+
+## Usage Examples
+
+### `nova up` — Error Intercept
+
+```bash
+# Auto-capture from terminal
+$ nova up
+
+# Or pipe errors directly
+$ python3 app.py 2>&1 | nova up
+```
+
+**What happens:**
+1. Scans last terminal output for error patterns
+2. If no error detected → prompts you to paste it (Ctrl+D to submit)
+3. Fuzzy-searches the team's KB (≥70% match)
+4. If no KB match → asks AI (if configured)
+5. Shows solution + command, asks permission to run
+
+### `nova add` — Knowledge Capture
+
+```bash
+$ nova add
+
+  Error signature: ModuleNotFoundError: No module named 'requests'
+  Solution (1 sentence): Install the missing Python package.
+  Fix command (optional, Enter to skip):    ← can leave empty
+
+  🔒 Sanitizing...
+  ✅ Entry saved to KB!
+```
+
+**Mandatory fields:** Error signature, Solution  
+**Optional field:** Fix command (press Enter to skip)
+
+Sensitive data (IPs, API keys, paths) is **automatically redacted** before saving.
+
+### `nova add-llm` — Add AI Provider
+
+```bash
+$ nova add-llm
+
+? 🤖 Choose AI provider:
+  ❯ groq
+    openai
+    claude
+
+? 🔑 API key: ****
+
+? 📦 Model:
+  ❯ llama-3.1-8b-instant
+
+? 🏷  Nickname: groq-llam
+
+  ✅ Provider 'groq-llam' added and set as active.
+```
+
+### `nova lp` — List Providers
+
+```bash
+$ nova lp
+
+  🤖 Configured AI Providers
+
+  ● active  groq-llam   (groq/llama-3.1-8b-instant)
+  ○         openai-gpt4 (openai/gpt-4o)
+```
+
+### `nova use <provider>` — Switch Provider
+
+```bash
+$ nova use openai-gpt4
+  ✅ Active provider set to 'openai-gpt4' (openai/gpt-4o)
+```
+
+## Configuration Storage
+
+```
+~/.nova/
+├── config.json       # KB path, username, active provider
+├── providers.json    # All provider configs {nickname: {provider, model, endpoint}}
+└── secrets.json      # API keys {nickname: key}  (kept separate for safety)
+```
+
+## KB Schema (`kb.json`)
+
+```json
+[
+  {
+    "error": "ModuleNotFoundError: No module named 'requests'",
+    "solution": "Install the missing Python package using pip.",
+    "command": "pip install requests",
+    "added_by": "visat",
+    "timestamp": "2026-02-15T21:00:00+00:00"
+  }
+]
+```
+
+## OneDrive Sync
+
+```
+SharePoint:  Company SharePoint → Nova-KB → kb.json
+                    ↕ (OneDrive auto-sync)
+Local:       /mnt/c/Users/you/OneDrive - Company/Nova-KB/kb.json
+                    ↕ (Nova reads/writes)
+```
+
+OneDrive conflict copies (`kb-DESKTOP-123.json`) are **auto-detected and merged**.
+
+## Safety & Privacy
+
+- API keys, tokens, passwords → `[KEY_REDACTED]`
+- IP addresses → `[IP_REDACTED]`
+- User paths → `C:\Users\[USER]`
+- Long tokens → `[DATA_REDACTED]`
+- Email addresses → `[EMAIL_REDACTED]`
+
+## Requirements
+
+- Python 3.8+
+- WSL / Linux
+- OneDrive desktop sync (for KB access)
+- `questionary` (auto-installed via pip)
+- AI provider API key (optional)
+
+## License
+
+MIT

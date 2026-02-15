@@ -1,0 +1,44 @@
+[
+    {
+        "error": "ModuleNotFoundError: No module named 'requests'",
+        "solution": "Install the missing Python package using pip.",
+        "command": "pip install requests",
+        "added_by": "nova-seed",
+        "timestamp": "2026-02-15T00:00:00+00:00"
+    },
+    {
+        "error": "bash: python3: command not found",
+        "solution": "Python 3 is not installed or not in PATH. Install it via your package manager.",
+        "command": "sudo apt install python3",
+        "added_by": "nova-seed",
+        "timestamp": "2026-02-15T00:00:01+00:00"
+    },
+    {
+        "error": "permission denied",
+        "solution": "The current user doesn't have execute permissions on the file.",
+        "command": "chmod +x <filename>",
+        "added_by": "nova-seed",
+        "timestamp": "2026-02-15T00:00:02+00:00"
+    },
+    {
+        "error": "ENOSPC: no space left on device",
+        "solution": "Disk is full. Free space by clearing caches or old files.",
+        "command": "df -h && sudo apt clean && docker system prune -f",
+        "added_by": "nova-seed",
+        "timestamp": "2026-02-15T00:00:03+00:00"
+    },
+    {
+        "error": "ECONNREFUSED 127.0.0.1:5432",
+        "solution": "PostgreSQL is not running. Start the service.",
+        "command": "sudo systemctl start postgresql",
+        "added_by": "nova-seed",
+        "timestamp": "2026-02-15T00:00:04+00:00"
+    },
+    {
+        "error": "npm ERR! ERESOLVE unable to resolve dependency tree",
+        "solution": "Dependency conflict in node_modules. Force install with legacy peer deps.",
+        "command": "npm install --legacy-peer-deps",
+        "added_by": "nova-seed",
+        "timestamp": "2026-02-15T00:00:05+00:00"
+    }
+]
