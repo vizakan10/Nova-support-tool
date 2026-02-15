@@ -771,6 +771,7 @@ def cmd_help():
     print(f"  {C.CYAN}Configuration:{C.RESET}")
     print(f"    nova setup                First-time setup (KB path + AI)")
     print(f"    nova version              Show version info")
+    print(f"    nova reload / --r         Refresh shell instructions")
     print(f"    nova secrets-path         Show secrets file location")
     print(f"    nova help                 Show this help message")
     print()
@@ -801,6 +802,17 @@ def cmd_help():
 def cmd_version():
     """nova version — Show Nova version."""
     print(f"\n  {C.BOLD}Nova CLI{C.RESET}  {C.CYAN}v{VERSION}{C.RESET}\n")
+
+
+def cmd_reload():
+    """nova reload — Instruction to refresh shell."""
+    shell = os.path.basename(os.environ.get("SHELL", "bash"))
+    rc_file = "~/.bashrc" if "bash" in shell else "~/.zshrc"
+    
+    print(f"\n  {C.BLUE}{C.BOLD}🔄 Refresh Terminal Session{C.RESET}")
+    print(f"  {C.DIM}Your shell configuration has changed.{C.RESET}\n")
+    print(f"  {C.YELLOW}Please run:{C.RESET}")
+    print(f"  {C.BOLD}{C.CYAN}source {rc_file}{C.RESET}\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -838,6 +850,10 @@ def main():
 
     if command in ("version", "--v", "-v", "--version"):
         cmd_version()
+        return
+
+    if command in ("reload", "--r", "-r"):
+        cmd_reload()
         return
 
 
