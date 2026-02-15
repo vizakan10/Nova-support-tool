@@ -41,6 +41,15 @@ chmod +x install.sh
 | `nova up` | Capture error → search KB → AI fallback |
 | `nova add` | Save a new error solution to the KB |
 
+### KB Management
+| Command | Description |
+|---------|-------------|
+| `nova add-kb <nick> <path>` | Add/Register a new KB folder |
+| `nova rm-kb <nick>` | Unlink a Knowledge Base |
+| `nova use-kb <nick>` | Switch the active Knowledge Base |
+| `nova lk` | List all configured KBs |
+| `nova cur-kb` | Show current active KB and path |
+
 ### AI Provider Management
 | Command | Description |
 |---------|-------------|

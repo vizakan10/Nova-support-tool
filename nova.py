@@ -17,12 +17,6 @@ VERSION = "2.0.0"
 
 
 from config import (
-    get_config,
-    interactive_setup,
-    load_config,
-    save_config,
-    load_providers,
-    load_secrets,
     add_provider_interactive,
     remove_provider,
     switch_provider,
@@ -30,6 +24,11 @@ from config import (
     get_active_ai_config,
     test_provider_connection,
     secrets_path,
+    add_kb_source,
+    remove_kb_source,
+    switch_kb,
+    list_all_kbs,
+    get_active_kb_path,
 )
 from kb_manager import (
     fuzzy_search,
@@ -402,13 +401,19 @@ def _run_command(command):
 
 def cmd_up(config):
     """nova up — Error Intercept Protocol."""
-    kb_path = config.get("kb_path", "")
+    kb_path = get_active_kb_path()
     if not kb_path or not os.path.isdir(kb_path):
-        print(f"  {C.RED}❌ KB path not configured or missing.{C.RESET}")
-        print(f"  {C.DIM}   Run:  nova setup{C.RESET}")
+        print(f"  {C.RED}❌ Active KB not found or not configured.{C.RESET}")
+        print(f"  {C.DIM}   Run:  nova setup  or  nova use-kb <nickname>{C.RESET}")
         return
 
-    print(f"\n  {C.BLUE}{C.BOLD}🔍 Nova — Error Intercept{C.RESET}\n")
+    print(f"\n  {C.BLUE}{C.BOLD}🔍 Nova — Error Intercept{C.RESET}")
+    
+    # Show active KB
+    kbs = list_all_kbs()
+    active_kb = next((i for i in kbs if i[2]), None)
+    if active_kb:
+        print(f"  {C.DIM}KB: {active_kb[0]} ({active_kb[1]}){C.RESET}\n")
 
     # 1. Conflict merge
     merged = resolve_conflicts(kb_path)
@@ -491,12 +496,19 @@ def cmd_up(config):
 
 def cmd_add(config):
     """nova add — Add a new error solution to the KB."""
-    kb_path = config.get("kb_path", "")
+    kb_path = get_active_kb_path()
     if not kb_path or not os.path.isdir(kb_path):
-        print(f"  {C.RED}❌ KB path not configured. Run:  nova setup{C.RESET}")
+        print(f"  {C.RED}❌ Active KB not configured. Run:  nova setup{C.RESET}")
         return
 
     print(f"\n  {C.BLUE}{C.BOLD}📝 Nova — Add Solution{C.RESET}")
+    
+    # Show active KB
+    kbs = list_all_kbs()
+    active_kb = next((i for i in kbs if i[2]), None)
+    if active_kb:
+        print(f"  {C.DIM}KB: {active_kb[0]} ({active_kb[1]}){C.RESET}")
+    
     print(f"  {C.DIM}{'─' * 44}{C.RESET}\n")
 
     try:
@@ -648,6 +660,73 @@ def cmd_test(nickname=None):
     print()
 
 
+# ── nova lk ──────────────────────────────────────────────────────────────────
+
+def cmd_lk():
+    """nova lk — List all Knowledge Bases."""
+    items = list_all_kbs()
+    if not items:
+        print(f"\n  {C.YELLOW}No KBs configured.{C.RESET}")
+        return
+
+    print(f"\n  {C.BLUE}{C.BOLD}📚 Configured Knowledge Bases{C.RESET}\n")
+    for nick, path, is_active in items:
+        marker = f"{C.GREEN}● active{C.RESET}" if is_active else f"{C.DIM}○{C.RESET}"
+        print(f"  {marker}  {C.BOLD}{nick:<12}{C.RESET} {C.DIM}({path}){C.RESET}")
+    print()
+
+
+# ── nova add-kb <nick> <path> ────────────────────────────────────────────────
+
+def cmd_add_kb(nickname, path):
+    """nova add-kb <nickname> <path> — Add a new KB folder."""
+    if not nickname or not path:
+        print(f"  {C.RED}❌ Usage:  nova add-kb <nickname> <path>{C.RESET}")
+        return
+    add_kb_source(nickname, path)
+    print(f"  {C.GREEN}✅ KB '{nickname}' registered at: {path}{C.RESET}")
+
+
+# ── nova rm-kb <nick> ───────────────────────────────────────────────────────
+
+def cmd_rm_kb(nickname):
+    """nova rm-kb <nickname> — Unlink a KB folder."""
+    if not nickname:
+        print(f"  {C.RED}❌ Usage:  nova rm-kb <nickname>{C.RESET}")
+        return
+    if remove_kb_source(nickname):
+        print(f"  {C.GREEN}✅ KB '{nickname}' removed.{C.RESET}")
+    else:
+        print(f"  {C.RED}❌ KB '{nickname}' not found.{C.RESET}")
+
+
+# ── nova use-kb <nick> ──────────────────────────────────────────────────────
+
+def cmd_use_kb(nickname):
+    """nova use-kb <nickname> — Switch active KB."""
+    if not nickname:
+        print(f"  {C.RED}❌ Usage:  nova use-kb <nickname>{C.RESET}")
+        return
+    if switch_kb(nickname):
+        print(f"  {C.GREEN}✅ Switched to KB: {nickname}{C.RESET}")
+    else:
+        print(f"  {C.RED}❌ KB '{nickname}' not found.{C.RESET}")
+
+
+# ── nova cur-kb ─────────────────────────────────────────────────────────────
+
+def cmd_cur_kb():
+    """nova cur-kb — Show current active KB and path."""
+    items = list_all_kbs()
+    active = next((i for i in items if i[2]), None)
+    if not active:
+        print(f"  {C.YELLOW}No active KB configured.{C.RESET}")
+        return
+    print(f"\n  {C.GREEN}{C.BOLD}● Current Knowledge Base{C.RESET}")
+    print(f"    Nickname : {C.CYAN}{active[0]}{C.RESET}")
+    print(f"    Path     : {C.DIM}{active[1]}{C.RESET}\n")
+
+
 # ── nova secrets-path ────────────────────────────────────────────────────────
 
 def cmd_secrets_path():
@@ -669,6 +748,13 @@ def cmd_help():
     print(f"  {C.CYAN}Error Resolution:{C.RESET}")
     print(f"    nova up                   Capture error → search KB → AI fallback")
     print(f"    nova add                  Save a new error solution to the KB")
+    print()
+    print(f"  {C.CYAN}KB Management:{C.RESET}")
+    print(f"    nova add-kb <nick> <path> Add/Register a new KB folder")
+    print(f"    nova rm-kb <nick>         Unlink a KB folder")
+    print(f"    nova use-kb <nick>        Switch active Knowledge Base")
+    print(f"    nova lk                   List all configured KBs")
+    print(f"    nova cur-kb               Show current active KB & path")
     print()
     print(f"  {C.CYAN}AI Provider Management:{C.RESET}")
     print(f"    nova add-llm              Add a new AI provider")
@@ -786,7 +872,32 @@ def main():
         cmd_use(target)
         return
 
+    if command == "lk":
+        cmd_lk()
+        return
+
+    if command == "add-kb":
+        nick = args[1] if len(args) > 1 else ""
+        path = args[2] if len(args) > 2 else ""
+        cmd_add_kb(nick, path)
+        return
+
+    if command == "rm-kb":
+        target = args[1] if len(args) > 1 else ""
+        cmd_rm_kb(target)
+        return
+
+    if command == "use-kb":
+        target = args[1] if len(args) > 1 else ""
+        cmd_use_kb(target)
+        return
+
+    if command == "cur-kb":
+        cmd_cur_kb()
+        return
+
     # ── Commands that need config ────────────────────────────────────────
+
     config = get_config()
     if not config:
         return
