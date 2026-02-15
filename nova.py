@@ -17,6 +17,10 @@ VERSION = "2.0.0"
 
 
 from config import (
+    get_config,
+    interactive_setup,
+    load_config,
+    load_providers,
     add_provider_interactive,
     remove_provider,
     switch_provider,
