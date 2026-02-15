@@ -176,6 +176,15 @@ OneDrive conflict copies (`kb-DESKTOP-123.json`) are **auto-detected and merged*
 - Long tokens → `[DATA_REDACTED]`
 - Email addresses → `[EMAIL_REDACTED]`
 
+## Uninstallation
+
+To completely remove Nova CLI and all its data:
+
+```bash
+chmod +x uninstall.sh
+./uninstall.sh
+```
+
 ## Requirements
 
 - Python 3.8+
