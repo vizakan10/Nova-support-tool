@@ -160,8 +160,34 @@ $ nova use openai-gpt4
 ~/.nova/
 ├── config.json       # KB path, username, active provider
 ├── providers.json    # All provider configs {nickname: {provider, model, endpoint}}
-└── secrets.json      # API keys {nickname: key}  (kept separate for safety)
+├── secrets.json      # API keys {nickname: key}  (kept separate for safety)
+└── announce_state.json  # Last daily announcements check (used silently)
 ```
+
+## Announcements
+
+**Simple:** You push updates to `announcements.json` → next day when users run `nova`, they see it. No push → nothing new.
+
+On the first run of any `nova` command each day, Nova fetches `announcements.json` from the repo. New announcements (new `id`) are shown once. To announce something:
+
+1. Edit **`announcements.json`** in the repo (same format as below).
+2. Push to the default branch (`main` or `master`).
+3. Users get new announcements the next time they run `nova` on a new day.
+
+```json
+{
+  "announcements": [
+    {
+      "id": "unique-id-20260216",
+      "date": "2026-02-16",
+      "title": "Your title",
+      "body": "Message body. Can be multiple lines."
+    }
+  ]
+}
+```
+
+Each announcement needs a unique `id`; users won’t see the same one twice.
 
 ## KB Schema (`kb.json`)
 

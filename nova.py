@@ -15,6 +15,10 @@ from datetime import datetime
 
 VERSION = "2.0.0"
 
+# Fetched on first run each day; you can publish announcements by updating this file in the repo
+ANNOUNCEMENTS_URL = "https://raw.githubusercontent.com/vizakan10/Nova-support-tool/main/announcements.json"
+ANNOUNCE_STATE_FILE = os.path.join(os.path.expanduser("~/.nova"), "announce_state.json")
+
 
 from config import (
     get_config,
@@ -1180,44 +1184,58 @@ def cmd_fresh():
 # ── nova help ────────────────────────────────────────────────────────────────
 
 def cmd_help():
-    """nova help — Print full docs (professional layout + Active Environment)."""
+    """nova help — Print full docs (table + Active Environment). Prompts for setup if first run."""
     print(BANNER)
     print(f"  {C.ORANGE}{C.BOLD}Commands{C.RESET}\n")
-    print(f"  {C.ORANGE}  Support{C.RESET}")
-    print(f"    nova up                   Solve last terminal error (KB → AI)")
-    print(f"    nova fix                  Paste error and get instant solution")
-    print(f"    nova ask / -a [question]  Ask Nova AI a direct question")
-    print(f"    nova solve                Review history and add custom fix")
-    print(f"    nova log [n]              Show last n terminal entries")
-    print()
-    print(f"  {C.ORANGE}  Knowledge{C.RESET}")
-    print(f"    nova add                  Manually add one error pattern")
-    print(f"    nova kb list              List all solutions (table with ID)")
-    print(f"    nova kb rm <ID>            Delete solution by table ID")
-    print(f"    nova kb search [query]    Manual lookup test")
-    print(f"    nova kb path [path]       View or update KB storage path")
-    print()
-    print(f"  {C.ORANGE}  AI / LLM{C.RESET}")
-    print(f"    nova save <nick>          Save current LLM setup as profile")
-    print(f"    nova use <nick>           Switch to saved profile")
-    print(f"    nova providers            List supported AI hosts")
-    print(f"    nova set-provider         Change AI host (interactive)")
-    print(f"    nova model <m>            Update model for active provider")
-    print(f"    nova apikey [k]           Save provider API key securely")
-    print(f"    nova add-llm              Add new AI provider")
-    print(f"    nova rm <nick>            Remove a provider")
-    print(f"    nova lp / cur / test      List, current, test connection")
-    print()
-    print(f"  {C.ORANGE}  System{C.RESET}")
-    print(f"    nova list                 Show all paths and profile nicknames")
-    print(f"    nova init                 Run configuration wizard")
-    print(f"    nova config               Show full config + paths")
-    print(f"    nova fresh                Wipe all settings and restart")
-    print(f"    nova help                 Show this guide")
-    print()
+    # Table format: Category | Command | Description (match reference image)
+    sep = f"  {C.ORANGE}{'─' * 78}{C.RESET}"
+    print(f"  {C.BOLD}{'Category':<12} {'Command':<24} {'Description':<38}{C.RESET}")
+    print(sep)
+    print(f"  {'Support':<12} {'nova up':<24} {'Solves last terminal error (KB → AI).':<38}")
+    print(f"  {'':<12} {'nova fix':<24} {'Paste error, get solution instantly.':<38}")
+    print(f"  {'':<12} {'nova ask / -a':<24} {'Ask Nova AI a direct question.':<38}")
+    print(f"  {'':<12} {'nova solve':<24} {'Review history, add custom fixes.':<38}")
+    print(f"  {'':<12} {'nova log [n]':<24} {'Show last n terminal entries.':<38}")
+    print(sep)
+    print(f"  {'Knowledge':<12} {'nova add':<24} {'Manually add one error pattern.':<38}")
+    print(f"  {'':<12} {'nova kb list':<24} {'Display all solutions (table with ID).':<38}")
+    print(f"  {'':<12} {'nova kb rm <ID>':<24} {'Delete a solution by table ID.':<38}")
+    print(f"  {'':<12} {'nova kb search':<24} {'Manual lookup test for any error.':<38}")
+    print(f"  {'':<12} {'nova kb path':<24} {'View or update KB storage path.':<38}")
+    print(sep)
+    print(f"  {'AI / LLM':<12} {'nova save <nick>':<24} {'Save current LLM setup as profile.':<38}")
+    print(f"  {'':<12} {'nova use <nick>':<24} {'Switch to a saved profile.':<38}")
+    print(f"  {'':<12} {'nova providers':<24} {'List all supported AI hosts.':<38}")
+    print(f"  {'':<12} {'nova set-provider':<24} {'Change the AI host (interactive).':<38}")
+    print(f"  {'':<12} {'nova model <m>':<24} {'Update model (e.g. gpt-4o, sonnet).':<38}")
+    print(f"  {'':<12} {'nova apikey <k>':<24} {'Securely save provider API key.':<38}")
+    print(f"  {'':<12} {'nova add-llm':<24} {'Add a new AI provider.':<38}")
+    print(f"  {'':<12} {'nova rm <nick>':<24} {'Remove a provider profile.':<38}")
+    print(sep)
+    print(f"  {'System':<12} {'nova list':<24} {'Show all paths and profile nicks.':<38}")
+    print(f"  {'':<12} {'nova rm <n/idx>':<24} {'Delete profile nick or path.':<38}")
+    print(f"  {'':<12} {'nova init':<24} {'Run the configuration wizard.':<38}")
+    print(f"  {'':<12} {'nova config':<24} {'Show full active configuration.':<38}")
+    print(f"  {'':<12} {'nova fresh':<24} {'Wipe all settings, start over.':<38}")
+    print(f"  {'':<12} {'nova help':<24} {'Show this guide.':<38}")
+    print(sep)
     print(f"  {C.ORANGE}  Workflow{C.RESET}  Run any command → if it fails →  nova up  → KB search → AI fallback")
     print()
     _active_env()
+    # First-time: prompt for setup if no config or no active KB
+    cfg = load_config()
+    if not cfg or not cfg.get("active_kb"):
+        print(f"  {C.GREEN}💡 First time? Run  nova setup  to set KB path and AI provider.{C.RESET}")
+        try:
+            ans = input(f"  {C.YELLOW}Run setup now? [Y/n]: {C.RESET}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if ans in ("", "y", "yes"):
+            print()
+            cmd_setup()
+        else:
+            print()
 
 
 def cmd_version():
@@ -1267,12 +1285,83 @@ def _show_available_providers():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  DAILY ANNOUNCEMENTS (silent fetch on first run of the day)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _maybe_show_announcements():
+    """On first nova run each day: fetch announcements from repo and show new ones."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    state_dir = os.path.dirname(ANNOUNCE_STATE_FILE)
+    state = {}
+    if os.path.exists(ANNOUNCE_STATE_FILE):
+        try:
+            with open(ANNOUNCE_STATE_FILE, "r", encoding="utf-8") as fh:
+                state = json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            pass
+    if state.get("last_check_date") == today:
+        return
+    # Fetch announcements (silent on failure)
+    try:
+        req = urllib.request.Request(ANNOUNCEMENTS_URL)
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
+        state["last_check_date"] = today
+        os.makedirs(state_dir, exist_ok=True)
+        try:
+            with open(ANNOUNCE_STATE_FILE, "w", encoding="utf-8") as fh:
+                json.dump(state, fh, indent=2)
+        except OSError:
+            pass
+        return
+    announcements = data.get("announcements") or []
+    seen = set(state.get("seen_ids") or [])
+    to_show = [a for a in announcements if a.get("id") and a["id"] not in seen]
+    if not to_show:
+        state["last_check_date"] = today
+        os.makedirs(state_dir, exist_ok=True)
+        try:
+            with open(ANNOUNCE_STATE_FILE, "w", encoding="utf-8") as fh:
+                json.dump(state, fh, indent=2)
+        except OSError:
+            pass
+        return
+    # Show announcements clearly in the terminal
+    print()
+    print(f"  {C.ORANGE}╔══════════════════════════════════════════════════════╗{C.RESET}")
+    print(f"  {C.ORANGE}║  {C.BOLD}📢  ANNOUNCEMENTS{C.ORANGE}                                    ║{C.RESET}")
+    print(f"  {C.ORANGE}╠══════════════════════════════════════════════════════╣{C.RESET}")
+    for a in to_show:
+        title = a.get("title") or "Announcement"
+        body = (a.get("body") or "").strip()
+        print(f"  {C.ORANGE}║{C.RESET}  {C.BOLD}{C.ORANGE}{title}{C.RESET}")
+        if body:
+            for line in body.splitlines():
+                print(f"  {C.ORANGE}║{C.RESET}  {line}")
+        print(f"  {C.ORANGE}║{C.RESET}")
+    print(f"  {C.ORANGE}╚══════════════════════════════════════════════════════╝{C.RESET}")
+    print()
+    state["last_check_date"] = today
+    state["seen_ids"] = list(seen) + [a["id"] for a in to_show]
+    os.makedirs(state_dir, exist_ok=True)
+    try:
+        with open(ANNOUNCE_STATE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2)
+    except OSError:
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
     """CLI dispatcher."""
     args = sys.argv[1:]
+
+    # Daily announcements: first run of the day fetches and shows new ones
+    _maybe_show_announcements()
 
     if not args:
         cmd_help()

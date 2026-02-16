@@ -1,4 +1,19 @@
-from setuptools import setup, find_packages
+from setuptools import setup
+from setuptools.command.install import install
+
+
+class PostInstall(install):
+    """Print setup instructions after install (smooth install flow)."""
+    def run(self):
+        install.run(self)
+        msg = """
+  Nova CLI installed successfully.
+  Run:  nova   or  nova help   (setup will be offered if not configured).
+  If 'nova' not found, add to PATH:  export PATH="$HOME/.local/bin:$PATH"
+  Then run:  nova setup   to set KB path and AI provider.
+"""
+        print(msg)
+
 
 setup(
     name="nova-cli",
@@ -17,6 +32,7 @@ setup(
     python_requires=">=3.8",
     include_package_data=True,
     package_data={"": ["kb.json"]},
+    cmdclass={"install": PostInstall},
     classifiers=[
         "Programming Language :: Python :: 3",
         "Operating System :: POSIX :: Linux",

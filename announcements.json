@@ -1,0 +1,10 @@
+{
+  "announcements": [
+    {
+      "id": "welcome-2026",
+      "date": "2026-02-16",
+      "title": "Welcome to Nova",
+      "body": "Use 'nova setup' to set your KB path and AI provider.\nRun 'nova help' to see all commands."
+    }
+  ]
+}
