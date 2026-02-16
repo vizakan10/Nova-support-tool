@@ -33,40 +33,61 @@ chmod +x install.sh
 ./install.sh
 ```
 
+**If you see** `AttributeError: module 'nova' has no attribute 'main'` **(name clash with another package), run this once in the clone then run `nova setup` again:**
+
+```bash
+cd Nova-support-tool
+cp nova.py nova_cli.py && rm -f nova.py
+sed -i 's/"nova", "config", "kb_manager"/"nova_cli", "config", "kb_manager"/' setup.py
+sed -i 's/nova=nova:main/nova=nova_cli:main/' setup.py
+pip install --user --break-system-packages -e .
+```
+
 ## All Commands
 
-### Error Resolution
-| Command | Description |
-|---------|-------------|
-| `nova up` | Capture error → search KB → AI fallback |
-| `nova add` | Save a new error solution to the KB |
+Run **`nova help`** to see the full command list and **Active Environment** (Config path, KB file path, Secrets path, AI host).
 
-### KB Management
+### Support
 | Command | Description |
 |---------|-------------|
-| `nova add-kb <nick> <path>` | Add/Register a new KB folder |
-| `nova rm-kb <nick>` | Unlink a Knowledge Base |
-| `nova use-kb <nick>` | Switch the active Knowledge Base |
-| `nova lk` | List all configured KBs |
-| `nova cur-kb` | Show current active KB and path |
+| `nova up` | Solve last terminal error (KB → AI) |
+| `nova fix` | Paste error and get instant solution |
+| `nova ask` / `nova -a [question]` | Ask Nova AI a direct question |
+| `nova solve` | Review history and add a custom fix |
+| `nova log [n]` | Show last n terminal entries |
 
-### AI Provider Management
+### Knowledge (KB = kb.json)
 | Command | Description |
 |---------|-------------|
-| `nova add-llm` | Add a new AI provider (with nickname) |
-| `nova rm <provider>` | Remove an AI provider |
-| `nova use <provider>` | Switch active AI provider |
-| `nova lp` | List all configured AI providers |
-| `nova cur` | Show current active provider |
-| `nova test [provider]` | Test connection to a provider |
+| `nova add` | Manually add one error pattern |
+| `nova kb list` | List all solutions (table with ID) |
+| `nova kb rm <ID>` | Delete solution by table ID |
+| `nova kb search [query]` | Manual lookup test |
+| `nova kb path [path]` | View or update KB storage path |
+| `nova add-kb <nick> <path>` | Register a new KB folder |
+| `nova rm-kb <nick>` / `nova use-kb <nick>` | Unlink or switch KB |
+| `nova lk` / `nova cur-kb` | List KBs, show current |
 
-### Configuration
+### AI / LLM
 | Command | Description |
 |---------|-------------|
-| `nova setup` | First-time config (KB path + AI) |
-| `nova version` | Show version info |
-| `nova secrets-path` | Show secrets file location |
-| `nova help` | Show help message |
+| `nova save <nick>` | Save current LLM setup as profile |
+| `nova use <nick>` | Switch to saved profile |
+| `nova providers` | List supported AI hosts |
+| `nova set-provider` | Change AI host (interactive) |
+| `nova model <m>` | Update model for active provider |
+| `nova apikey [k]` | Save provider API key securely |
+| `nova add-llm` | Add new AI provider |
+| `nova rm <nick>` / `nova lp` / `nova cur` / `nova test` | Remove, list, current, test |
+
+### System
+| Command | Description |
+|---------|-------------|
+| `nova list` | Show all paths and profile nicknames |
+| `nova init` | Run configuration wizard (alias: setup) |
+| `nova config` | Show full config + Active Environment |
+| `nova fresh` | Wipe all settings and restart |
+| `nova version` / `nova secrets-path` / `nova help` | Version, secrets path, help |
 
 ## Usage Examples
 
@@ -149,8 +170,34 @@ $ nova use openai-gpt4
 ~/.nova/
 ├── config.json       # KB path, username, active provider
 ├── providers.json    # All provider configs {nickname: {provider, model, endpoint}}
-└── secrets.json      # API keys {nickname: key}  (kept separate for safety)
+├── secrets.json      # API keys {nickname: key}  (kept separate for safety)
+└── announce_state.json  # Last daily announcements check (used silently)
 ```
+
+## Announcements
+
+**Simple:** You push updates to `announcements.json` → next day when users run `nova`, they see it. No push → nothing new. Users can run **`nova ano`** anytime to fetch and view the latest announcements.
+
+On the first run of any `nova` command each day, Nova fetches `announcements.json` from the repo. New announcements (new `id`) are shown once. To announce something:
+
+1. Edit **`announcements.json`** in the repo (same format as below).
+2. Push to the default branch (`main` or `master`).
+3. Users get new announcements the next time they run `nova` on a new day.
+
+```json
+{
+  "announcements": [
+    {
+      "id": "unique-id-20260216",
+      "date": "2026-02-16",
+      "title": "Your title",
+      "body": "Message body. Can be multiple lines."
+    }
+  ]
+}
+```
+
+Each announcement needs a unique `id`; users won’t see the same one twice.
 
 ## KB Schema (`kb.json`)
 
@@ -187,12 +234,23 @@ OneDrive conflict copies (`kb-DESKTOP-123.json`) are **auto-detected and merged*
 
 ## Uninstallation
 
-To completely remove Nova CLI and all its data:
+You can run the uninstaller **from anywhere** (you don't have to be inside the cloned repo):
 
 ```bash
+# If you're in the cloned folder:
 chmod +x uninstall.sh
 ./uninstall.sh
+
+# Or from elsewhere, run the script by path:
+/path/to/Nova-support-tool/uninstall.sh
 ```
+
+The script will:
+1. Ask you to type **`uninstall`** to confirm.
+2. Uninstall the package and remove the `nova` script.
+3. Optionally delete `~/.nova` (config and secrets).
+4. Optionally remove the Nova PATH line from `~/.bashrc`.
+5. Optionally **remove the cloned Nova-support-tool folder** (if you run from inside it, or if you enter its path when asked).
 
 ## Requirements
 

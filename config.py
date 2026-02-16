@@ -5,6 +5,7 @@ Multi-provider AI support, secrets management, multi-KB sources, interactive set
 """
 
 import os
+import re
 import json
 import getpass
 
@@ -29,6 +30,7 @@ AI_PROVIDERS = {
     "openai": {
         "endpoint": "https://api.openai.com/v1/chat/completions",
         "models": ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo", "Other"],
+        
     },
     "claude": {
         "endpoint": "https://api.anthropic.com/v1/messages",
@@ -59,6 +61,27 @@ AI_PROVIDERS = {
 
 def _ensure_dir():
     os.makedirs(CONFIG_DIR, exist_ok=True)
+
+
+def _normalize_kb_path(path):
+    """
+    When running on Linux/WSL, convert Windows paths to /mnt/... so they work.
+    Users can paste C:\\Users\\... or C:/... and we store the path that works.
+    """
+    path = str(path).strip().strip('"\'').replace("\\", "/")
+    if not path:
+        return path
+    path = os.path.expanduser(path)
+    # On Linux/WSL: C:\ or C:/ -> /mnt/c/
+    if os.name != "nt" and len(path) >= 2 and path[1] == ":" and path[0].upper().isalpha():
+        drive = path[0].lower()
+        path = "/mnt/" + drive + path[2:]
+    return path
+
+
+def normalize_kb_path(path):
+    """Public helper: normalize a KB path (Windows -> /mnt when on WSL)."""
+    return _normalize_kb_path(path)
 
 
 def _load_json(path, default=None):
@@ -139,9 +162,10 @@ def save_kbs(kbs):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def add_kb_source(nickname, path):
-    """Register a new Knowledge Base folder."""
+    """Register a new Knowledge Base folder. Normalizes Windows -> /mnt when on WSL."""
+    path = _normalize_kb_path(path)
     kbs = load_kbs()
-    kbs[nickname] = os.path.abspath(os.path.expanduser(path))
+    kbs[nickname] = os.path.abspath(path) if path else path
     save_kbs(kbs)
     _ensure_kb_file(kbs[nickname])
 
@@ -260,6 +284,21 @@ def switch_provider(nickname):
     return True
 
 
+def save_current_as_profile(nickname):
+    """Save the current LLM setup as a new profile (clone under new nickname). Returns True if success."""
+    info = get_active_ai_config()
+    if not info or not nickname.strip():
+        return False
+    add_provider(
+        nickname.strip(),
+        info.get("provider", ""),
+        info.get("model", ""),
+        info.get("endpoint", ""),
+        info.get("api_key", ""),
+    )
+    return True
+
+
 def get_active_ai_config():
     """
     Return the active provider's full config dict for use by nova up.
@@ -338,20 +377,51 @@ def _setup_rich(q):
     print("╚══════════════════════════════════════════╝\n")
 
     kb_path = q.text(
-        "📁 KB folder path (OneDrive-synced folder):",
-        instruction="e.g. /mnt/c/Users/you/OneDrive/Nova-KB",
+        "📁 KB folder path (or path to kb.json):",
+        instruction="e.g. /mnt/c/Users/you/OneDrive/Nova-KB  or  .../Nova-tool-Db/kb.json",
         style=style,
     ).ask()
     if kb_path is None: return None
-    kb_path = os.path.expanduser(kb_path.strip())
-
+    # Strip whitespace (including newlines) and quotes so paste doesn't break
+    kb_path = kb_path.strip().strip('"\'').replace("\n", " ").replace("\r", " ").strip()
+    # If newline was replaced by space, fix "folder \kb.json" or "folder kb.json" -> "folder/kb.json"
+    kb_path = re.sub(r'\s+[\\/]?\s*kb\.json\s*$', '/kb.json', kb_path, flags=re.IGNORECASE).strip()
     if not kb_path:
         print("   ❌ KB path cannot be empty.")
+        return None
+
+    # If user entered path to kb.json, use the folder that contains it (only if there is a folder part)
+    if kb_path.rstrip().endswith("kb.json"):
+        _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
+        if _dir:
+            kb_path = _dir
+
+    # Normalize: Windows path -> /mnt/... when on WSL so it works
+    kb_path = _normalize_kb_path(kb_path)
+
+    # Never use a file path: if it's a file or ends with kb.json, use the folder
+    if kb_path and (os.path.isfile(kb_path) or kb_path.rstrip().endswith("kb.json")):
+        _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
+        if _dir:
+            kb_path = _dir
+    kb_path = (kb_path or "").rstrip().rstrip("/")
+
+    # Reject empty or path that is just "kb.json" (no folder)
+    if not kb_path:
+        print("   ❌ KB path is empty or invalid (e.g. only 'kb.json' was entered). Please enter the folder path.")
+        return None
+    if os.path.basename(kb_path.rstrip("/")) == "kb.json":
+        print("   ❌ Please enter the folder that contains kb.json (e.g. C:\\Users\\...\\Nova-tool-Db), not the file path.")
         return None
 
     if not os.path.isdir(kb_path):
         create = q.confirm(f"   '{kb_path}' doesn't exist. Create it?", default=True, style=style).ask()
         if create:
+            if os.path.isfile(kb_path):
+                kb_path = os.path.dirname(kb_path)
+            if not kb_path:
+                print("   ❌ Cannot create: path is invalid.")
+                return None
             os.makedirs(kb_path, exist_ok=True)
         else:
             return None
@@ -377,18 +447,42 @@ def _setup_rich(q):
 def _setup_basic():
     print("\n══════════════════════════════════════════\n        🚀  Nova CLI — First Setup\n══════════════════════════════════════════\n")
     try:
-        kb_path = input("📁 KB folder path: ").strip()
+        kb_path = input("📁 KB folder path (or path to kb.json): ").strip().strip('"\'').replace("\n", " ").replace("\r", " ").strip()
     except (EOFError, KeyboardInterrupt): return None
-    kb_path = os.path.expanduser(kb_path)
 
     if not kb_path:
         print("   ❌ KB path cannot be empty.")
         return None
 
+    if kb_path.rstrip().endswith("kb.json"):
+        _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
+        if _dir:
+            kb_path = _dir
+
+    kb_path = _normalize_kb_path(kb_path)
+
+    if kb_path and (os.path.isfile(kb_path) or kb_path.rstrip().endswith("kb.json")):
+        _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
+        if _dir:
+            kb_path = _dir
+    kb_path = (kb_path or "").rstrip().rstrip("/")
+
+    if not kb_path:
+        print("   ❌ KB path is empty or invalid. Please enter the folder path.")
+        return None
+    if os.path.basename(kb_path.rstrip("/")) == "kb.json":
+        print("   ❌ Please enter the folder that contains kb.json, not the file path.")
+        return None
+
     if not os.path.isdir(kb_path):
         yn = input(f"   '{kb_path}' doesn't exist. Create? [Y/n]: ").strip().lower()
-        if yn in ("", "y", "yes"): os.makedirs(kb_path, exist_ok=True)
-        else: return None
+        if yn in ("", "y", "yes"):
+            if os.path.isfile(kb_path):
+                kb_path = os.path.dirname(kb_path)
+            if kb_path:
+                os.makedirs(kb_path, exist_ok=True)
+        else:
+            return None
 
     _ensure_kb_file(kb_path)
     add_kb_source("main", kb_path)
@@ -536,4 +630,47 @@ def get_config():
     return cfg
 
 
-def secrets_path(): return SECRETS_FILE
+def secrets_path():
+    return SECRETS_FILE
+
+
+def config_path():
+    """Return path to main config file (for display)."""
+    return CONFIG_FILE
+
+
+def set_active_provider_model(model):
+    """Update the active provider's model. Returns True if success."""
+    cfg = load_config()
+    active = (cfg or {}).get("active_provider", "")
+    if not active:
+        return False
+    providers = load_providers()
+    if active not in providers:
+        return False
+    providers[active]["model"] = model.strip()
+    save_providers(providers)
+    return True
+
+
+def set_active_provider_apikey(api_key):
+    """Update the active provider's API key. Returns True if success."""
+    cfg = load_config()
+    active = (cfg or {}).get("active_provider", "")
+    if not active:
+        return False
+    secrets = load_secrets()
+    secrets[active] = api_key.strip()
+    save_secrets(secrets)
+    return True
+
+
+def reset_all_config():
+    """Wipe all Nova config (config, providers, secrets, kb_sources). Returns True."""
+    try:
+        for path in (CONFIG_FILE, PROVIDERS_FILE, SECRETS_FILE, KBS_FILE):
+            if os.path.exists(path):
+                os.remove(path)
+        return True
+    except OSError:
+        return False
