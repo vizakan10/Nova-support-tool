@@ -353,16 +353,28 @@ def _setup_rich(q):
     print("╚══════════════════════════════════════════╝\n")
 
     kb_path = q.text(
-        "📁 KB folder path (OneDrive-synced folder):",
-        instruction="e.g. /mnt/c/Users/you/OneDrive/Nova-KB",
+        "📁 KB folder path (or path to kb.json):",
+        instruction="e.g. /mnt/c/Users/you/OneDrive/Nova-KB  or  .../Nova-tool-Db/kb.json",
         style=style,
     ).ask()
     if kb_path is None: return None
-    kb_path = os.path.expanduser(kb_path.strip())
+    kb_path = os.path.expanduser(kb_path.strip().strip('"\''))
 
     if not kb_path:
         print("   ❌ KB path cannot be empty.")
         return None
+
+    # If user entered path to kb.json, use the folder that contains it
+    if kb_path.endswith("kb.json"):
+        kb_path = os.path.dirname(os.path.normpath(kb_path))
+
+    # On WSL/Linux, accept Windows path and convert: C:\Users\... -> /mnt/c/Users/...
+    _path = kb_path.replace("\\", "/")
+    if _path.startswith("C:/") or _path.startswith("c:/"):
+        kb_path = "/mnt/c" + _path[2:]
+    elif len(_path) >= 2 and _path[1] == ":" and _path[0].upper() in "CDEF":
+        drive = _path[0].lower()
+        kb_path = f"/mnt/{drive}" + _path[2:].replace("\\", "/")
 
     if not os.path.isdir(kb_path):
         create = q.confirm(f"   '{kb_path}' doesn't exist. Create it?", default=True, style=style).ask()
@@ -392,13 +404,16 @@ def _setup_rich(q):
 def _setup_basic():
     print("\n══════════════════════════════════════════\n        🚀  Nova CLI — First Setup\n══════════════════════════════════════════\n")
     try:
-        kb_path = input("📁 KB folder path: ").strip()
+        kb_path = input("📁 KB folder path (or path to kb.json): ").strip().strip('"\'')
     except (EOFError, KeyboardInterrupt): return None
     kb_path = os.path.expanduser(kb_path)
 
     if not kb_path:
         print("   ❌ KB path cannot be empty.")
         return None
+
+    if kb_path.endswith("kb.json"):
+        kb_path = os.path.dirname(os.path.normpath(kb_path))
 
     if not os.path.isdir(kb_path):
         yn = input(f"   '{kb_path}' doesn't exist. Create? [Y/n]: ").strip().lower()
