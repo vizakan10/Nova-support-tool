@@ -1359,14 +1359,29 @@ def _maybe_show_announcements():
 
 
 def _fetch_announcements():
-    """Fetch announcements from the repo. Returns list of announcements or None on failure."""
+    """Fetch announcements from the repo. Returns list of announcements or None on failure.
+    Tries remote URL first; on 404/network error falls back to local announcements.json
+    (current directory or next to this script) so e.g. running from the repo works."""
     try:
         req = urllib.request.Request(ANNOUNCEMENTS_URL)
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return data.get("announcements") or []
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
-        return None
+        pass
+    # Fallback: local file (e.g. when URL 404s or default branch isn't main)
+    for path in [
+        os.path.join(os.getcwd(), "announcements.json"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "announcements.json"),
+    ]:
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                return data.get("announcements") or []
+            except (json.JSONDecodeError, OSError):
+                pass
+    return None
 
 
 def cmd_ano():
