@@ -233,14 +233,23 @@ OneDrive conflict copies (`kb-DESKTOP-123.json`) are **auto-detected and merged*
 
 ## Uninstallation
 
-To completely remove Nova CLI and all its data:
+You can run the uninstaller **from anywhere** (you don't have to be inside the cloned repo):
 
 ```bash
+# If you're in the cloned folder:
 chmod +x uninstall.sh
 ./uninstall.sh
+
+# Or from elsewhere, run the script by path:
+/path/to/Nova-support-tool/uninstall.sh
 ```
 
-**Security:** The uninstaller asks you to type **`uninstall`** to confirm before removing anything.
+The script will:
+1. Ask you to type **`uninstall`** to confirm.
+2. Uninstall the package and remove the `nova` script.
+3. Optionally delete `~/.nova` (config and secrets).
+4. Optionally remove the Nova PATH line from `~/.bashrc`.
+5. Optionally **remove the cloned Nova-support-tool folder** (if you run from inside it, or if you enter its path when asked).
 
 ## Requirements
 

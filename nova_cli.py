@@ -41,6 +41,7 @@ from config import (
     switch_kb,
     list_all_kbs,
     get_active_kb_path,
+    normalize_kb_path,
     set_active_provider_model,
     set_active_provider_apikey,
     reset_all_config,
@@ -1008,7 +1009,8 @@ def cmd_kb_search(query=None):
 def cmd_kb_path(new_path=None):
     """nova kb path [path] — View or update the active KB path."""
     if new_path and new_path.strip():
-        path = os.path.abspath(os.path.expanduser(new_path.strip()))
+        path = normalize_kb_path(new_path)
+        path = os.path.abspath(path)
         if not os.path.isdir(path):
             os.makedirs(path, exist_ok=True)
         kb_file = os.path.join(path, "kb.json")

@@ -1,5 +1,6 @@
 #!/bin/bash
 # Nova CLI — Uninstallation Script
+# You can run this from anywhere (no need to be inside the cloned repo).
 
 echo "╔══════════════════════════════════════════╗"
 echo "║         🗑️  Nova CLI Uninstaller         ║"
@@ -7,7 +8,7 @@ echo "╚═══════════════════════�
 echo ""
 
 # 0. Require confirmation (password-style: user must type 'uninstall')
-echo "⚠️  This will remove Nova CLI and optionally your config and PATH entry."
+echo "⚠️  This will remove Nova CLI and optionally your config, PATH entry, and cloned folder."
 read -s -p "Type 'uninstall' to confirm: " confirm
 echo ""
 if [ "$confirm" != "uninstall" ]; then
@@ -39,13 +40,11 @@ if [ -d "$CONFIG_DIR" ]; then
     fi
 fi
 
-# 3. Ask to remove PATH entry from .bashrc
+# 4. Ask to remove PATH entry from .bashrc
 BASHRC="$HOME/.bashrc"
 if grep -q "# Nova CLI Path" "$BASHRC"; then
     read -p "❓ Remove Nova PATH entry from ~/.bashrc? [y/N]: " rem_path
     if [[ $rem_path =~ ^[Yy]$ ]]; then
-        # Create a temp file without the Nova lines
-        # This removes the comment and the export line following it
         sed -i '/# Nova CLI Path/,+1d' "$BASHRC"
         echo "✅ PATH entry removed from ~/.bashrc."
         echo "💡 Note: You may need to restart your terminal or run 'source ~/.bashrc'."
@@ -54,6 +53,29 @@ if grep -q "# Nova CLI Path" "$BASHRC"; then
     fi
 fi
 
+# 5. Ask to remove cloned Nova-support-tool folder (if they installed via clone)
+REPO_TO_REMOVE=""
+if [ -f "install.sh" ] && [ -f "setup.py" ]; then
+    read -p "❓ Remove this cloned folder (Nova-support-tool)? [y/N]: " del_repo
+    if [[ $del_repo =~ ^[Yy]$ ]]; then
+        REPO_TO_REMOVE="$(pwd)"
+    fi
+else
+    read -p "❓ Remove a cloned Nova-support-tool folder? Enter its path (or Enter to skip): " repo_path
+    repo_path="$(echo "$repo_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    if [ -n "$repo_path" ] && [ -d "$repo_path" ] && [ -f "$repo_path/install.sh" ]; then
+        REPO_TO_REMOVE="$repo_path"
+    fi
+fi
+
 echo ""
 echo "🎉 Nova CLI has been uninstalled."
 echo ""
+
+if [ -n "$REPO_TO_REMOVE" ]; then
+    echo "🗑️  Removing cloned folder: $REPO_TO_REMOVE"
+    cd "$(dirname "$REPO_TO_REMOVE")" 2>/dev/null || true
+    rm -rf "$REPO_TO_REMOVE"
+    echo "✅ Folder removed."
+    echo ""
+fi

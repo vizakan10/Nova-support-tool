@@ -61,6 +61,27 @@ def _ensure_dir():
     os.makedirs(CONFIG_DIR, exist_ok=True)
 
 
+def _normalize_kb_path(path):
+    """
+    When running on Linux/WSL, convert Windows paths to /mnt/... so they work.
+    Users can paste C:\\Users\\... or C:/... and we store the path that works.
+    """
+    path = str(path).strip().strip('"\'').replace("\\", "/")
+    if not path:
+        return path
+    path = os.path.expanduser(path)
+    # On Linux/WSL: C:\ or C:/ -> /mnt/c/
+    if os.name != "nt" and len(path) >= 2 and path[1] == ":" and path[0].upper().isalpha():
+        drive = path[0].lower()
+        path = "/mnt/" + drive + path[2:]
+    return path
+
+
+def normalize_kb_path(path):
+    """Public helper: normalize a KB path (Windows -> /mnt when on WSL)."""
+    return _normalize_kb_path(path)
+
+
 def _load_json(path, default=None):
     if default is None:
         default = {}
@@ -139,9 +160,10 @@ def save_kbs(kbs):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def add_kb_source(nickname, path):
-    """Register a new Knowledge Base folder."""
+    """Register a new Knowledge Base folder. Normalizes Windows -> /mnt when on WSL."""
+    path = _normalize_kb_path(path)
     kbs = load_kbs()
-    kbs[nickname] = os.path.abspath(os.path.expanduser(path))
+    kbs[nickname] = os.path.abspath(path) if path else path
     save_kbs(kbs)
     _ensure_kb_file(kbs[nickname])
 
@@ -358,8 +380,6 @@ def _setup_rich(q):
         style=style,
     ).ask()
     if kb_path is None: return None
-    kb_path = os.path.expanduser(kb_path.strip().strip('"\''))
-
     if not kb_path:
         print("   ❌ KB path cannot be empty.")
         return None
@@ -368,13 +388,8 @@ def _setup_rich(q):
     if kb_path.endswith("kb.json"):
         kb_path = os.path.dirname(os.path.normpath(kb_path))
 
-    # On WSL/Linux, accept Windows path and convert: C:\Users\... -> /mnt/c/Users/...
-    _path = kb_path.replace("\\", "/")
-    if _path.startswith("C:/") or _path.startswith("c:/"):
-        kb_path = "/mnt/c" + _path[2:]
-    elif len(_path) >= 2 and _path[1] == ":" and _path[0].upper() in "CDEF":
-        drive = _path[0].lower()
-        kb_path = f"/mnt/{drive}" + _path[2:].replace("\\", "/")
+    # Normalize: Windows path -> /mnt/... when on WSL so it works
+    kb_path = _normalize_kb_path(kb_path)
 
     if not os.path.isdir(kb_path):
         create = q.confirm(f"   '{kb_path}' doesn't exist. Create it?", default=True, style=style).ask()
@@ -404,9 +419,8 @@ def _setup_rich(q):
 def _setup_basic():
     print("\n══════════════════════════════════════════\n        🚀  Nova CLI — First Setup\n══════════════════════════════════════════\n")
     try:
-        kb_path = input("📁 KB folder path (or path to kb.json): ").strip().strip('"\'')
+        kb_path = input("📁 KB folder path (or path to kb.json): ").strip()
     except (EOFError, KeyboardInterrupt): return None
-    kb_path = os.path.expanduser(kb_path)
 
     if not kb_path:
         print("   ❌ KB path cannot be empty.")
@@ -414,6 +428,8 @@ def _setup_basic():
 
     if kb_path.endswith("kb.json"):
         kb_path = os.path.dirname(os.path.normpath(kb_path))
+
+    kb_path = _normalize_kb_path(kb_path)
 
     if not os.path.isdir(kb_path):
         yn = input(f"   '{kb_path}' doesn't exist. Create? [Y/n]: ").strip().lower()
