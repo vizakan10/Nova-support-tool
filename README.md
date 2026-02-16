@@ -34,6 +34,7 @@ chmod +x install.sh
 ```
 
 **If you see** `AttributeError: module 'nova' has no attribute 'main'` **(name clash with another package), run this once in the clone then run `nova setup` again:**
+
 ```bash
 cd Nova-support-tool
 cp nova.py nova_cli.py && rm -f nova.py

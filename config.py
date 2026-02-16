@@ -5,6 +5,7 @@ Multi-provider AI support, secrets management, multi-KB sources, interactive set
 """
 
 import os
+import re
 import json
 import getpass
 
@@ -382,28 +383,44 @@ def _setup_rich(q):
     if kb_path is None: return None
     # Strip whitespace (including newlines) and quotes so paste doesn't break
     kb_path = kb_path.strip().strip('"\'').replace("\n", " ").replace("\r", " ").strip()
+    # If newline was replaced by space, fix "folder \kb.json" or "folder kb.json" -> "folder/kb.json"
+    kb_path = re.sub(r'\s+[\\/]?\s*kb\.json\s*$', '/kb.json', kb_path, flags=re.IGNORECASE).strip()
     if not kb_path:
         print("   ❌ KB path cannot be empty.")
         return None
 
-    # If user entered path to kb.json, use the folder that contains it
+    # If user entered path to kb.json, use the folder that contains it (only if there is a folder part)
     if kb_path.rstrip().endswith("kb.json"):
-        kb_path = os.path.dirname(os.path.normpath(kb_path.rstrip()))
+        _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
+        if _dir:
+            kb_path = _dir
 
     # Normalize: Windows path -> /mnt/... when on WSL so it works
     kb_path = _normalize_kb_path(kb_path)
 
     # Never use a file path: if it's a file or ends with kb.json, use the folder
-    if os.path.isfile(kb_path) or kb_path.rstrip().endswith("kb.json"):
-        kb_path = os.path.dirname(os.path.normpath(kb_path.rstrip()))
-    kb_path = kb_path.rstrip().rstrip("/")
+    if kb_path and (os.path.isfile(kb_path) or kb_path.rstrip().endswith("kb.json")):
+        _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
+        if _dir:
+            kb_path = _dir
+    kb_path = (kb_path or "").rstrip().rstrip("/")
+
+    # Reject empty or path that is just "kb.json" (no folder)
+    if not kb_path:
+        print("   ❌ KB path is empty or invalid (e.g. only 'kb.json' was entered). Please enter the folder path.")
+        return None
+    if os.path.basename(kb_path.rstrip("/")) == "kb.json":
+        print("   ❌ Please enter the folder that contains kb.json (e.g. C:\\Users\\...\\Nova-tool-Db), not the file path.")
+        return None
 
     if not os.path.isdir(kb_path):
         create = q.confirm(f"   '{kb_path}' doesn't exist. Create it?", default=True, style=style).ask()
         if create:
-            # Ensure we never try to create a path that is a file
             if os.path.isfile(kb_path):
                 kb_path = os.path.dirname(kb_path)
+            if not kb_path:
+                print("   ❌ Cannot create: path is invalid.")
+                return None
             os.makedirs(kb_path, exist_ok=True)
         else:
             return None
@@ -437,20 +454,32 @@ def _setup_basic():
         return None
 
     if kb_path.rstrip().endswith("kb.json"):
-        kb_path = os.path.dirname(os.path.normpath(kb_path.rstrip()))
+        _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
+        if _dir:
+            kb_path = _dir
 
     kb_path = _normalize_kb_path(kb_path)
 
-    if os.path.isfile(kb_path) or kb_path.rstrip().endswith("kb.json"):
-        kb_path = os.path.dirname(os.path.normpath(kb_path.rstrip()))
-    kb_path = kb_path.rstrip().rstrip("/")
+    if kb_path and (os.path.isfile(kb_path) or kb_path.rstrip().endswith("kb.json")):
+        _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
+        if _dir:
+            kb_path = _dir
+    kb_path = (kb_path or "").rstrip().rstrip("/")
+
+    if not kb_path:
+        print("   ❌ KB path is empty or invalid. Please enter the folder path.")
+        return None
+    if os.path.basename(kb_path.rstrip("/")) == "kb.json":
+        print("   ❌ Please enter the folder that contains kb.json, not the file path.")
+        return None
 
     if not os.path.isdir(kb_path):
         yn = input(f"   '{kb_path}' doesn't exist. Create? [Y/n]: ").strip().lower()
         if yn in ("", "y", "yes"):
             if os.path.isfile(kb_path):
                 kb_path = os.path.dirname(kb_path)
-            os.makedirs(kb_path, exist_ok=True)
+            if kb_path:
+                os.makedirs(kb_path, exist_ok=True)
         else:
             return None
 
