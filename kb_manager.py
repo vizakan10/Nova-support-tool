@@ -254,3 +254,26 @@ def add_entry(kb_path, error, solution, command, added_by):
     data.append(entry)
     save_kb(kb_path, data)
     return True, entry
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  DELETE ENTRY (by table ID)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def delete_entry(kb_path, entry_id):
+    """
+    Remove an entry by its 1-based table ID.
+
+    Returns ``(True, None)`` on success, or ``(False, reason_string)`` on failure.
+    """
+    resolve_conflicts(kb_path)
+    data = load_kb(kb_path)
+    try:
+        idx = int(entry_id)
+        if idx < 1 or idx > len(data):
+            return False, f"No entry with ID {entry_id}. Valid range: 1–{len(data)}."
+    except (TypeError, ValueError):
+        return False, f"Invalid ID: {entry_id}. Use a number (e.g. nova kb rm 3)."
+    data.pop(idx - 1)
+    save_kb(kb_path, data)
+    return True, None

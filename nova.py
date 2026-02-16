@@ -21,23 +21,34 @@ from config import (
     interactive_setup,
     load_config,
     load_providers,
+    load_kbs,
+    save_kbs,
     add_provider_interactive,
+    add_provider,
     remove_provider,
     switch_provider,
     list_all_providers,
     get_active_ai_config,
     test_provider_connection,
     secrets_path,
+    config_path,
     add_kb_source,
     remove_kb_source,
     switch_kb,
     list_all_kbs,
     get_active_kb_path,
+    set_active_provider_model,
+    set_active_provider_apikey,
+    reset_all_config,
+    save_current_as_profile,
+    CONFIG_FILE,
+    AI_PROVIDERS,
 )
 from kb_manager import (
     fuzzy_search,
     load_kb,
     add_entry,
+    delete_entry,
     resolve_conflicts,
     sanitize,
 )
@@ -63,13 +74,14 @@ class C:
     MAGENTA = "\033[95m" if _enabled else ""
     CYAN = "\033[96m" if _enabled else ""
     WHITE = "\033[97m" if _enabled else ""
+    ORANGE = "\033[38;5;208m" if _enabled else ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  BANNER
 # ═══════════════════════════════════════════════════════════════════════════════
 
-BANNER = f"""{C.BLUE}{C.BOLD}
+BANNER = f"""{C.ORANGE}{C.BOLD}
     ╔═══════════════════════════════════════════════╗
     ║   ███╗   ██╗  ██████╗  ██╗   ██╗  █████╗     ║
     ║   ████╗  ██║ ██╔═══██╗ ██║   ██║ ██╔══██╗    ║
@@ -77,8 +89,9 @@ BANNER = f"""{C.BLUE}{C.BOLD}
     ║   ██║╚██╗██║ ██║   ██║ ╚██╗ ██╔╝ ██╔══██║    ║
     ║   ██║ ╚████║ ╚██████╔╝  ╚████╔╝  ██║  ██║    ║
     ║   ╚═╝  ╚═══╝  ╚═════╝    ╚═══╝   ╚═╝  ╚═╝    ║
-    ║             Support Tool                     ║
+    ║         [ SUPPORT TOOL ]  v{VERSION} PRO         ║
     ╚═══════════════════════════════════════════════╝{C.RESET}
+{C.ORANGE}    Terminal Error Resolution Tool{C.RESET}
 """
 
 
@@ -317,6 +330,48 @@ def call_ai(error_text, ai_config):
     }
 
 
+_AI_ASK_PROMPT = """\
+You are a concise technical assistant. Answer the following in a clear, short way.
+
+Question: {query}
+"""
+
+
+def call_ai_ask(query, ai_config):
+    """Call AI with a free-form question. Returns response text or None."""
+    if not query or not ai_config:
+        return None
+    provider = ai_config.get("provider", "")
+    api_key = ai_config.get("api_key", "")
+    model = ai_config.get("model", "")
+    endpoint = ai_config.get("endpoint", "")
+    if not all([provider, api_key, model, endpoint]):
+        return None
+    prompt = _AI_ASK_PROMPT.format(query=query.strip())
+    if provider == "claude":
+        body = {"model": model, "max_tokens": 500, "messages": [{"role": "user", "content": prompt}]}
+        headers = {"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"}
+    else:
+        body = {
+            "model": model,
+            "messages": [{"role": "system", "content": "You are a concise technical assistant."}, {"role": "user", "content": prompt}],
+            "max_tokens": 500,
+            "temperature": 0.3,
+        }
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    payload = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(endpoint, data=payload, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        print(f"  {C.RED}⚠  AI request failed: {exc}{C.RESET}")
+        return None
+    if provider == "claude":
+        return (data.get("content") or [{}])[0].get("text", "")
+    return (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  DISPLAY HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -371,6 +426,27 @@ def _ask_yn(prompt, default_yes=True):
     if default_yes:
         return ans not in ("n", "no")
     return ans in ("y", "yes")
+
+
+def _active_env():
+    """Print Active Environment block (Config, KB path, Secrets path, AI host)."""
+    cfg_path = config_path()
+    kb_path = get_active_kb_path()
+    kb_display = os.path.join(kb_path, "kb.json") if kb_path else "—"
+    sec_path = secrets_path()
+    cfg = load_config() or {}
+    active_prov = cfg.get("active_provider", "")
+    providers = load_providers()
+    info = providers.get(active_prov, {}) if active_prov else {}
+    ai_display = f"{info.get('provider', '—')} ({info.get('model', '—')})" if info else "—"
+    print(f"  {C.ORANGE}{'─' * 52}{C.RESET}")
+    print(f"  {C.ORANGE}{C.BOLD}  Active Environment{C.RESET}")
+    print(f"  {C.ORANGE}{'─' * 52}{C.RESET}")
+    print(f"  {C.BOLD}  Config{C.RESET}   {C.DIM}{cfg_path}{C.RESET}")
+    print(f"  {C.BOLD}  KB File{C.RESET}   {C.DIM}{kb_display}{C.RESET}")
+    print(f"  {C.BOLD}  Secrets{C.RESET}   {C.DIM}{sec_path}{C.RESET}")
+    print(f"  {C.BOLD}  AI Host{C.RESET}   {C.DIM}{ai_display}{C.RESET}")
+    print(f"  {C.ORANGE}{'─' * 52}{C.RESET}\n")
 
 
 def _run_command(command):
@@ -742,61 +818,406 @@ def cmd_secrets_path():
     print()
 
 
+# ── nova fix ─────────────────────────────────────────────────────────────────
+
+def cmd_fix(config):
+    """nova fix — Paste error and get instant solution (KB → AI)."""
+    kb_path = get_active_kb_path()
+    if not kb_path or not os.path.isdir(kb_path):
+        print(f"  {C.RED}❌ Active KB not configured. Run:  nova setup{C.RESET}")
+        return
+    print(f"\n  {C.ORANGE}{C.BOLD}🔧 Nova — Paste & Fix{C.RESET}\n")
+    raw = _prompt_paste()
+    if not raw:
+        print(f"  {C.YELLOW}⚠  No input received.{C.RESET}")
+        return
+    error_sig = detect_error(raw) or raw.strip()[:250]
+    resolve_conflicts(kb_path)
+    kb_data = load_kb(kb_path)
+    results = fuzzy_search(error_sig, kb_data, threshold=70)
+    if results:
+        best_entry, best_score = results[0]
+        cmd = display_solution(best_entry, score=best_score, source="KB")
+        _run_command(cmd)
+        return
+    ai_config = get_active_ai_config()
+    if ai_config:
+        print(f"\n  {C.CYAN}🤖 Asking AI...{C.RESET}")
+        ai_result = call_ai(raw, ai_config)
+        if ai_result and ai_result.get("solution"):
+            ai_entry = {"error": error_sig, "solution": ai_result["solution"], "command": ai_result.get("command", "")}
+            cmd = display_solution(ai_entry, source="AI")
+            _run_command(cmd)
+            if _ask_yn("💾 Save this fix to the KB?"):
+                ok, res = add_entry(kb_path, error_sig, ai_result["solution"], ai_result.get("command", ""), config.get("added_by", "unknown"))
+                if ok:
+                    print(f"  {C.GREEN}✅ Saved to KB.{C.RESET}")
+                else:
+                    print(f"  {C.YELLOW}⚠  {res}{C.RESET}")
+            return
+    print(f"  {C.YELLOW}No match and no AI. Run  nova add  to save a fix manually.{C.RESET}")
+
+
+# ── nova ask / nova -a ───────────────────────────────────────────────────────
+
+def cmd_ask(config, query=None):
+    """nova ask [question] / nova -a [question] — Ask Nova AI a direct question."""
+    ai_config = get_active_ai_config()
+    if not ai_config:
+        print(f"  {C.RED}❌ No AI provider configured. Run:  nova add-llm{C.RESET}")
+        return
+    if not query or not query.strip():
+        try:
+            query = input(f"  {C.BOLD}Your question:{C.RESET} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+    if not query:
+        print(f"  {C.YELLOW}⚠  No question entered.{C.RESET}")
+        return
+    print(f"\n  {C.CYAN}🤖 Asking AI...{C.RESET}\n")
+    answer = call_ai_ask(query, ai_config)
+    if answer:
+        print(f"  {C.GREEN}{answer.strip()}{C.RESET}\n")
+    else:
+        print(f"  {C.RED}No response from AI.{C.RESET}\n")
+
+
+# ── nova solve ───────────────────────────────────────────────────────────────
+
+def cmd_solve(config):
+    """nova solve — Review last command output and add a custom fix."""
+    print(f"\n  {C.ORANGE}{C.BOLD}📋 Nova — Solve & Add Fix{C.RESET}\n")
+    raw = get_terminal_output()
+    if not raw:
+        print(f"  {C.YELLOW}⚠  No input. Paste an error or run a command first.{C.RESET}")
+        return
+    error_sig = detect_error(raw) or raw.strip()[:250]
+    print(f"  {C.GREEN}Error:{C.RESET} {error_sig}\n")
+    kb_path = get_active_kb_path()
+    if not kb_path or not os.path.isdir(kb_path):
+        print(f"  {C.RED}❌ Active KB not configured. Run:  nova setup{C.RESET}")
+        return
+    try:
+        solution = input(f"  {C.BOLD}Solution (1 sentence):{C.RESET} ").strip()
+        if not solution:
+            print(f"  {C.YELLOW}Cancelled.{C.RESET}")
+            return
+        command = input(f"  {C.BOLD}Fix command (optional, Enter to skip):{C.RESET} ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    ok, result = add_entry(kb_path, error_sig, solution, command, config.get("added_by", "unknown"))
+    if ok:
+        print(f"  {C.GREEN}✅ Fix saved to KB.{C.RESET}")
+        display_solution(result, source="KB")
+    else:
+        print(f"  {C.YELLOW}⚠  {result}{C.RESET}")
+
+
+# ── nova log ─────────────────────────────────────────────────────────────────
+
+def cmd_log(n=20):
+    """nova log [n] — Show last n terminal (history) entries."""
+    histfile = os.environ.get("HISTFILE", os.path.expanduser("~/.bash_history"))
+    if not os.path.isfile(histfile):
+        print(f"  {C.YELLOW}No history file found: {histfile}{C.RESET}")
+        return
+    try:
+        with open(histfile, "r", encoding="utf-8", errors="replace") as fh:
+            lines = [l.strip() for l in fh.readlines() if l.strip()]
+    except OSError:
+        print(f"  {C.RED}Could not read history.{C.RESET}")
+        return
+    last_n = lines[-int(n) :] if n else lines[-20:]
+    print(f"\n  {C.ORANGE}{C.BOLD}📜 Last {len(last_n)} terminal entries{C.RESET}\n")
+    for i, line in enumerate(last_n, 1):
+        print(f"  {C.DIM}{i:3}.{C.RESET} {line}")
+    print()
+
+
+# ── nova kb list ─────────────────────────────────────────────────────────────
+
+def cmd_kb_list():
+    """nova kb list — List all solutions in the KB (table with ID)."""
+    kb_path = get_active_kb_path()
+    if not kb_path or not os.path.isdir(kb_path):
+        print(f"  {C.RED}❌ Active KB not configured. Run:  nova setup{C.RESET}")
+        return
+    resolve_conflicts(kb_path)
+    data = load_kb(kb_path)
+    print(f"\n  {C.ORANGE}{C.BOLD}📚 Knowledge Base — {len(data)} entries{C.RESET}\n")
+    print(f"  {C.DIM}{'ID':<5} {'Error':<50} {'Solution':<40}{C.RESET}")
+    print(f"  {C.ORANGE}{'─' * 95}{C.RESET}")
+    for i, entry in enumerate(data, 1):
+        err = (entry.get("error", "") or "")[:48]
+        sol = (entry.get("solution", "") or "")[:38]
+        print(f"  {i:<5} {err:<50} {sol:<40}")
+    print()
+
+
+# ── nova kb rm <ID> ───────────────────────────────────────────────────────────
+
+def cmd_kb_rm(entry_id):
+    """nova kb rm <ID> — Delete a solution by its table ID."""
+    if not entry_id:
+        print(f"  {C.RED}❌ Usage:  nova kb rm <ID>{C.RESET}")
+        return
+    kb_path = get_active_kb_path()
+    if not kb_path or not os.path.isdir(kb_path):
+        print(f"  {C.RED}❌ Active KB not configured.{C.RESET}")
+        return
+    ok, reason = delete_entry(kb_path, entry_id)
+    if ok:
+        print(f"  {C.GREEN}✅ Entry {entry_id} removed from KB.{C.RESET}")
+    else:
+        print(f"  {C.RED}❌ {reason}{C.RESET}")
+
+
+# ── nova kb search ──────────────────────────────────────────────────────────
+
+def cmd_kb_search(query=None):
+    """nova kb search [query] — Manual lookup test for any error."""
+    kb_path = get_active_kb_path()
+    if not kb_path or not os.path.isdir(kb_path):
+        print(f"  {C.RED}❌ Active KB not configured. Run:  nova setup{C.RESET}")
+        return
+    if not query or not query.strip():
+        try:
+            query = input(f"  {C.BOLD}Error text to search:{C.RESET} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+    if not query:
+        print(f"  {C.YELLOW}⚠  No query.{C.RESET}")
+        return
+    resolve_conflicts(kb_path)
+    data = load_kb(kb_path)
+    results = fuzzy_search(query, data, threshold=60)
+    print(f"\n  {C.ORANGE}{C.BOLD}🔍 Search: \"{query[:50]}...\"{C.RESET}\n" if len(query) > 50 else f"\n  {C.ORANGE}{C.BOLD}🔍 Search: \"{query}\"{C.RESET}\n")
+    if not results:
+        print(f"  {C.YELLOW}No matches (threshold 60%).{C.RESET}\n")
+        return
+    for entry, score in results[:10]:
+        display_solution(entry, score=score, source="KB")
+
+
+# ── nova kb path ──────────────────────────────────────────────────────────────
+
+def cmd_kb_path(new_path=None):
+    """nova kb path [path] — View or update the active KB path."""
+    if new_path and new_path.strip():
+        path = os.path.abspath(os.path.expanduser(new_path.strip()))
+        if not os.path.isdir(path):
+            os.makedirs(path, exist_ok=True)
+        kb_file = os.path.join(path, "kb.json")
+        if not os.path.exists(kb_file):
+            with open(kb_file, "w", encoding="utf-8") as fh:
+                json.dump([], fh, indent=2)
+        cfg = load_config()
+        kbs = load_kbs()
+        active = (cfg or {}).get("active_kb", "main")
+        kbs[active] = path
+        save_kbs(kbs)
+        print(f"  {C.GREEN}✅ KB path set to: {path}{C.RESET}")
+        return
+    items = list_all_kbs()
+    active = next((i for i in items if i[2]), None)
+    if not active:
+        print(f"  {C.YELLOW}No active KB. Run:  nova setup  or  nova use-kb <nick>{C.RESET}")
+        return
+    full = os.path.join(active[1], "kb.json")
+    print(f"\n  {C.BOLD}Active KB path:{C.RESET} {full}")
+    print(f"  {C.DIM}Nickname: {active[0]}{C.RESET}\n")
+
+
+# ── nova save <nick> ──────────────────────────────────────────────────────────
+
+def cmd_save(nickname):
+    """nova save <nick> — Save current LLM setup as a new profile."""
+    if not nickname or not nickname.strip():
+        print(f"  {C.RED}❌ Usage:  nova save <nickname>{C.RESET}")
+        return
+    if save_current_as_profile(nickname.strip()):
+        print(f"  {C.GREEN}✅ Current provider saved as profile '{nickname.strip()}'. Use:  nova use {nickname.strip()}{C.RESET}")
+    else:
+        print(f"  {C.RED}❌ No active provider to save. Run:  nova add-llm  first.{C.RESET}")
+
+
+# ── nova providers ───────────────────────────────────────────────────────────
+
+def cmd_providers():
+    """nova providers — List supported AI hosts (provider types)."""
+    print(f"\n  {C.ORANGE}{C.BOLD}🤖 Supported AI Providers{C.RESET}\n")
+    for p in AI_PROVIDERS:
+        print(f"  {C.CYAN}  • {p}{C.RESET}")
+    print()
+
+
+# ── nova set-provider ────────────────────────────────────────────────────────
+
+def cmd_set_provider():
+    """nova set-provider — Interactively change AI host (switch by nickname)."""
+    items = list_all_providers()
+    if not items:
+        print(f"  {C.YELLOW}No providers configured. Run:  nova add-llm{C.RESET}")
+        return
+    print(f"\n  {C.ORANGE}{C.BOLD}Switch AI Provider{C.RESET}\n")
+    for i, (nick, info, is_active) in enumerate(items, 1):
+        marker = "●" if is_active else "○"
+        print(f"  {i}. {marker} {nick}  ({info.get('provider')}/{info.get('model')})")
+    try:
+        choice = input(f"\n  {C.BOLD}Number or nickname to switch to:{C.RESET} ").strip()
+        if not choice:
+            return
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(items):
+                choice = items[idx - 1][0]
+        cmd_use(choice)
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+# ── nova model <m> ───────────────────────────────────────────────────────────
+
+def cmd_model(model=None):
+    """nova model [m] — Update the active provider's model."""
+    if not model or not model.strip():
+        print(f"  {C.RED}❌ Usage:  nova model <model-name>{C.RESET}")
+        return
+    if set_active_provider_model(model.strip()):
+        print(f"  {C.GREEN}✅ Model set to: {model.strip()}{C.RESET}")
+    else:
+        print(f"  {C.RED}❌ No active provider. Run:  nova use <nick>  or  nova add-llm{C.RESET}")
+
+
+# ── nova apikey <k> ──────────────────────────────────────────────────────────
+
+def cmd_apikey(key=None):
+    """nova apikey [k] — Securely save the active provider's API key."""
+    if key and key.strip():
+        if set_active_provider_apikey(key.strip()):
+            print(f"  {C.GREEN}✅ API key updated for active provider.{C.RESET}")
+        else:
+            print(f"  {C.RED}❌ No active provider. Run:  nova use <nick>  or  nova add-llm{C.RESET}")
+        return
+    try:
+        import getpass as gp
+        k = gp.getpass(prompt=f"  {C.BOLD}API key (hidden):{C.RESET} ")
+        if k and set_active_provider_apikey(k):
+            print(f"  {C.GREEN}✅ API key updated.{C.RESET}")
+        elif not k:
+            print(f"  {C.YELLOW}Cancelled.{C.RESET}")
+        else:
+            print(f"  {C.RED}❌ No active provider.{C.RESET}")
+    except (EOFError, KeyboardInterrupt):
+        print()
+
+
+# ── nova list ───────────────────────────────────────────────────────────────
+
+def cmd_list():
+    """nova list — Show all saved KB paths and AI profile nicknames."""
+    print(f"\n  {C.ORANGE}{C.BOLD}📋 Saved Paths & Profiles{C.RESET}\n")
+    kbs = list_all_kbs()
+    provs = list_all_providers()
+    print(f"  {C.BOLD}Knowledge Bases:{C.RESET}")
+    if not kbs:
+        print(f"  {C.DIM}  (none){C.RESET}")
+    for nick, path, is_active in kbs:
+        m = " ●" if is_active else ""
+        print(f"  {C.CYAN}  {nick}{m}{C.RESET}  {path}")
+    print(f"  {C.BOLD}AI Profiles:{C.RESET}")
+    if not provs:
+        print(f"  {C.DIM}  (none){C.RESET}")
+    for nick, info, is_active in provs:
+        m = " ●" if is_active else ""
+        print(f"  {C.CYAN}  {nick}{m}{C.RESET}  ({info.get('provider')}/{info.get('model')})")
+    print()
+
+
+# ── nova init ────────────────────────────────────────────────────────────────
+
+def cmd_init():
+    """nova init — Run the configuration wizard (alias for setup)."""
+    cmd_setup()
+
+
+# ── nova config ──────────────────────────────────────────────────────────────
+
+def cmd_config():
+    """nova config — Show full active configuration and Active Environment."""
+    cfg = load_config()
+    if not cfg:
+        print(f"  {C.YELLOW}Nova not configured. Run:  nova setup{C.RESET}")
+        return
+    print()
+    _active_env()
+    print(f"  {C.BOLD}User (added_by):{C.RESET} {cfg.get('added_by', '—')}")
+    print(f"  {C.BOLD}Active KB nick:{C.RESET} {cfg.get('active_kb', '—')}")
+    print(f"  {C.BOLD}Active AI nick:{C.RESET} {cfg.get('active_provider', '—')}\n")
+
+
+# ── nova fresh ───────────────────────────────────────────────────────────────
+
+def cmd_fresh():
+    """nova fresh — Wipe all settings and start over."""
+    print(f"\n  {C.RED}{C.BOLD}⚠  This will delete all Nova config, providers, and KB links.{C.RESET}")
+    if not _ask_yn("Type yes to confirm", default_yes=False):
+        print(f"  {C.DIM}Cancelled.{C.RESET}")
+        return
+    try:
+        confirm = input(f"  {C.YELLOW}Type 'fresh' to confirm:{C.RESET} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if confirm != "fresh":
+        print(f"  {C.DIM}Cancelled.{C.RESET}")
+        return
+    if reset_all_config():
+        print(f"  {C.GREEN}✅ All settings wiped. Run  nova setup  to configure again.{C.RESET}")
+    else:
+        print(f"  {C.RED}❌ Could not remove some files.{C.RESET}")
+
+
 # ── nova help ────────────────────────────────────────────────────────────────
 
 def cmd_help():
-    """nova help — Print full docs."""
+    """nova help — Print full docs (professional layout + Active Environment)."""
     print(BANNER)
-    print(f"  {C.BOLD}USAGE{C.RESET}")
+    print(f"  {C.ORANGE}{C.BOLD}Commands{C.RESET}\n")
+    print(f"  {C.ORANGE}  Support{C.RESET}")
+    print(f"    nova up                   Solve last terminal error (KB → AI)")
+    print(f"    nova fix                  Paste error and get instant solution")
+    print(f"    nova ask / -a [question]  Ask Nova AI a direct question")
+    print(f"    nova solve                Review history and add custom fix")
+    print(f"    nova log [n]              Show last n terminal entries")
     print()
-    print(f"  {C.CYAN}Error Resolution:{C.RESET}")
-    print(f"    nova up                   Capture error → search KB → AI fallback")
-    print(f"    nova add                  Save a new error solution to the KB")
+    print(f"  {C.ORANGE}  Knowledge{C.RESET}")
+    print(f"    nova add                  Manually add one error pattern")
+    print(f"    nova kb list              List all solutions (table with ID)")
+    print(f"    nova kb rm <ID>            Delete solution by table ID")
+    print(f"    nova kb search [query]    Manual lookup test")
+    print(f"    nova kb path [path]       View or update KB storage path")
     print()
-    print(f"  {C.CYAN}KB Management:{C.RESET}")
-    print(f"    nova add-kb <nick> <path> Add/Register a new KB folder")
-    print(f"    nova rm-kb <nick>         Unlink a KB folder")
-    print(f"    nova use-kb <nick>        Switch active Knowledge Base")
-    print(f"    nova lk                   List all configured KBs")
-    print(f"    nova cur-kb               Show current active KB & path")
+    print(f"  {C.ORANGE}  AI / LLM{C.RESET}")
+    print(f"    nova save <nick>          Save current LLM setup as profile")
+    print(f"    nova use <nick>           Switch to saved profile")
+    print(f"    nova providers            List supported AI hosts")
+    print(f"    nova set-provider         Change AI host (interactive)")
+    print(f"    nova model <m>            Update model for active provider")
+    print(f"    nova apikey [k]           Save provider API key securely")
+    print(f"    nova add-llm              Add new AI provider")
+    print(f"    nova rm <nick>            Remove a provider")
+    print(f"    nova lp / cur / test      List, current, test connection")
     print()
-    print(f"  {C.CYAN}AI Provider Management:{C.RESET}")
-    print(f"    nova add-llm              Add a new AI provider")
-    print(f"    nova rm <provider>        Remove a provider")
-    print(f"    nova use <provider>       Switch active AI provider")
-    print(f"    nova lp                   List all configured providers")
-    print(f"    nova cur                  Show current active provider")
-    print(f"    nova test [provider]      Test AI connection")
+    print(f"  {C.ORANGE}  System{C.RESET}")
+    print(f"    nova list                 Show all paths and profile nicknames")
+    print(f"    nova init                 Run configuration wizard")
+    print(f"    nova config               Show full config + paths")
+    print(f"    nova fresh                Wipe all settings and restart")
+    print(f"    nova help                 Show this guide")
     print()
-    print(f"  {C.CYAN}Configuration:{C.RESET}")
-    print(f"    nova setup                First-time setup (KB path + AI)")
-    print(f"    nova version              Show version info")
-    print(f"    nova reload / --r         Refresh shell instructions")
-    print(f"    nova secrets-path         Show secrets file location")
-    print(f"    nova help                 Show this help message")
+    print(f"  {C.ORANGE}  Workflow{C.RESET}  Run any command → if it fails →  nova up  → KB search → AI fallback")
     print()
-    print(f"  {C.BOLD}EXAMPLES{C.RESET}")
-    print(f"    {C.DIM}# Auto-capture from terminal{C.RESET}")
-    print(f"    $ nova up")
-    print()
-    print(f"    {C.DIM}# Pipe error output directly{C.RESET}")
-    print(f"    $ python3 app.py 2>&1 | nova up")
-    print()
-    print(f"    {C.DIM}# Add a fix you just discovered{C.RESET}")
-    print(f"    $ nova add")
-    print()
-    print(f"    {C.DIM}# Add OpenAI as a second provider{C.RESET}")
-    print(f"    $ nova add-llm")
-    print()
-    print(f"    {C.DIM}# Switch to a different provider{C.RESET}")
-    print(f"    $ nova use openai-gpt4")
-    print()
-    print(f"  {C.BOLD}PROTOCOLS{C.RESET}")
-    print(f"    {C.CYAN}Error Intercept{C.RESET}    — nova up scans, searches, suggests")
-    print(f"    {C.CYAN}Knowledge Capture{C.RESET}  — nova add sanitizes and saves")
-    print(f"    {C.CYAN}Safety & Privacy{C.RESET}   — auto-redacts IPs, keys, paths")
-    print(f"    {C.CYAN}Verification{C.RESET}       — re-runs fix, confirms success")
-    print()
+    _active_env()
 
 
 def cmd_version():
@@ -932,6 +1353,69 @@ def main():
         cmd_cur_kb()
         return
 
+    if command == "init":
+        cmd_init()
+        return
+
+    if command == "config":
+        cmd_config()
+        return
+
+    if command == "fresh":
+        cmd_fresh()
+        return
+
+    if command == "list":
+        cmd_list()
+        return
+
+    if command == "providers":
+        cmd_providers()
+        return
+
+    if command == "set-provider":
+        cmd_set_provider()
+        return
+
+    if command == "model":
+        model_arg = args[1] if len(args) > 1 else None
+        cmd_model(model_arg)
+        return
+
+    if command == "apikey":
+        key_arg = args[1] if len(args) > 1 else None
+        cmd_apikey(key_arg)
+        return
+
+    if command == "save":
+        nick = args[1] if len(args) > 1 else ""
+        cmd_save(nick)
+        return
+
+    if command == "kb":
+        kb_sub = (args[1] if len(args) > 1 else "").lower()
+        kb_rest = args[2:] if len(args) > 2 else []
+        if kb_sub == "list":
+            cmd_kb_list()
+        elif kb_sub == "rm":
+            cmd_kb_rm(kb_rest[0] if kb_rest else None)
+        elif kb_sub == "search":
+            cmd_kb_search(" ".join(kb_rest) if kb_rest else None)
+        elif kb_sub == "path":
+            cmd_kb_path(" ".join(kb_rest).strip() or None)
+        else:
+            print(f"  {C.RED}Usage:  nova kb list|rm|search|path [args]{C.RESET}")
+        return
+
+    if command == "log":
+        n_arg = args[1] if len(args) > 1 else "20"
+        try:
+            n = int(n_arg) if n_arg else 20
+        except ValueError:
+            n = 20
+        cmd_log(n)
+        return
+
     # ── Commands that need config ────────────────────────────────────────
 
     config = get_config()
@@ -942,6 +1426,13 @@ def main():
         cmd_up(config)
     elif command == "add":
         cmd_add(config)
+    elif command == "fix":
+        cmd_fix(config)
+    elif command in ("ask", "-a"):
+        query = " ".join(args[1:]).strip() if len(args) > 1 else None
+        cmd_ask(config, query)
+    elif command == "solve":
+        cmd_solve(config)
     else:
         print(f"  {C.RED}Unknown command: {command}{C.RESET}")
         print(f"  {C.DIM}Run  nova help  for usage.{C.RESET}")

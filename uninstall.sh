@@ -6,6 +6,16 @@ echo "║         🗑️  Nova CLI Uninstaller         ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
+# 0. Require confirmation (password-style: user must type 'uninstall')
+echo "⚠️  This will remove Nova CLI and optionally your config and PATH entry."
+read -s -p "Type 'uninstall' to confirm: " confirm
+echo ""
+if [ "$confirm" != "uninstall" ]; then
+    echo "❌ Confirmation failed. Exiting."
+    exit 1
+fi
+echo ""
+
 # 1. Uninstall the python package
 echo "⚙️  Uninstalling Nova CLI package..."
 # Use --break-system-packages for Ubuntu 24.04+ compatibility

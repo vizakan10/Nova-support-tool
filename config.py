@@ -260,6 +260,21 @@ def switch_provider(nickname):
     return True
 
 
+def save_current_as_profile(nickname):
+    """Save the current LLM setup as a new profile (clone under new nickname). Returns True if success."""
+    info = get_active_ai_config()
+    if not info or not nickname.strip():
+        return False
+    add_provider(
+        nickname.strip(),
+        info.get("provider", ""),
+        info.get("model", ""),
+        info.get("endpoint", ""),
+        info.get("api_key", ""),
+    )
+    return True
+
+
 def get_active_ai_config():
     """
     Return the active provider's full config dict for use by nova up.
@@ -536,4 +551,47 @@ def get_config():
     return cfg
 
 
-def secrets_path(): return SECRETS_FILE
+def secrets_path():
+    return SECRETS_FILE
+
+
+def config_path():
+    """Return path to main config file (for display)."""
+    return CONFIG_FILE
+
+
+def set_active_provider_model(model):
+    """Update the active provider's model. Returns True if success."""
+    cfg = load_config()
+    active = (cfg or {}).get("active_provider", "")
+    if not active:
+        return False
+    providers = load_providers()
+    if active not in providers:
+        return False
+    providers[active]["model"] = model.strip()
+    save_providers(providers)
+    return True
+
+
+def set_active_provider_apikey(api_key):
+    """Update the active provider's API key. Returns True if success."""
+    cfg = load_config()
+    active = (cfg or {}).get("active_provider", "")
+    if not active:
+        return False
+    secrets = load_secrets()
+    secrets[active] = api_key.strip()
+    save_secrets(secrets)
+    return True
+
+
+def reset_all_config():
+    """Wipe all Nova config (config, providers, secrets, kb_sources). Returns True."""
+    try:
+        for path in (CONFIG_FILE, PROVIDERS_FILE, SECRETS_FILE, KBS_FILE):
+            if os.path.exists(path):
+                os.remove(path)
+        return True
+    except OSError:
+        return False

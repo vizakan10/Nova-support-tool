@@ -35,38 +35,49 @@ chmod +x install.sh
 
 ## All Commands
 
-### Error Resolution
-| Command | Description |
-|---------|-------------|
-| `nova up` | Capture error → search KB → AI fallback |
-| `nova add` | Save a new error solution to the KB |
+Run **`nova help`** to see the full command list and **Active Environment** (Config path, KB file path, Secrets path, AI host).
 
-### KB Management
+### Support
 | Command | Description |
 |---------|-------------|
-| `nova add-kb <nick> <path>` | Add/Register a new KB folder |
-| `nova rm-kb <nick>` | Unlink a Knowledge Base |
-| `nova use-kb <nick>` | Switch the active Knowledge Base |
-| `nova lk` | List all configured KBs |
-| `nova cur-kb` | Show current active KB and path |
+| `nova up` | Solve last terminal error (KB → AI) |
+| `nova fix` | Paste error and get instant solution |
+| `nova ask` / `nova -a [question]` | Ask Nova AI a direct question |
+| `nova solve` | Review history and add a custom fix |
+| `nova log [n]` | Show last n terminal entries |
 
-### AI Provider Management
+### Knowledge (KB = kb.json)
 | Command | Description |
 |---------|-------------|
-| `nova add-llm` | Add a new AI provider (with nickname) |
-| `nova rm <provider>` | Remove an AI provider |
-| `nova use <provider>` | Switch active AI provider |
-| `nova lp` | List all configured AI providers |
-| `nova cur` | Show current active provider |
-| `nova test [provider]` | Test connection to a provider |
+| `nova add` | Manually add one error pattern |
+| `nova kb list` | List all solutions (table with ID) |
+| `nova kb rm <ID>` | Delete solution by table ID |
+| `nova kb search [query]` | Manual lookup test |
+| `nova kb path [path]` | View or update KB storage path |
+| `nova add-kb <nick> <path>` | Register a new KB folder |
+| `nova rm-kb <nick>` / `nova use-kb <nick>` | Unlink or switch KB |
+| `nova lk` / `nova cur-kb` | List KBs, show current |
 
-### Configuration
+### AI / LLM
 | Command | Description |
 |---------|-------------|
-| `nova setup` | First-time config (KB path + AI) |
-| `nova version` | Show version info |
-| `nova secrets-path` | Show secrets file location |
-| `nova help` | Show help message |
+| `nova save <nick>` | Save current LLM setup as profile |
+| `nova use <nick>` | Switch to saved profile |
+| `nova providers` | List supported AI hosts |
+| `nova set-provider` | Change AI host (interactive) |
+| `nova model <m>` | Update model for active provider |
+| `nova apikey [k]` | Save provider API key securely |
+| `nova add-llm` | Add new AI provider |
+| `nova rm <nick>` / `nova lp` / `nova cur` / `nova test` | Remove, list, current, test |
+
+### System
+| Command | Description |
+|---------|-------------|
+| `nova list` | Show all paths and profile nicknames |
+| `nova init` | Run configuration wizard (alias: setup) |
+| `nova config` | Show full config + Active Environment |
+| `nova fresh` | Wipe all settings and restart |
+| `nova version` / `nova secrets-path` / `nova help` | Version, secrets path, help |
 
 ## Usage Examples
 
@@ -193,6 +204,8 @@ To completely remove Nova CLI and all its data:
 chmod +x uninstall.sh
 ./uninstall.sh
 ```
+
+**Security:** The uninstaller asks you to type **`uninstall`** to confirm before removing anything.
 
 ## Requirements
 
