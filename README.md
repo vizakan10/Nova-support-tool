@@ -33,6 +33,15 @@ chmod +x install.sh
 ./install.sh
 ```
 
+**If you see** `AttributeError: module 'nova' has no attribute 'main'` **(name clash with another package), run this once in the clone then run `nova setup` again:**
+```bash
+cd Nova-support-tool
+cp nova.py nova_cli.py && rm -f nova.py
+sed -i 's/"nova", "config", "kb_manager"/"nova_cli", "config", "kb_manager"/' setup.py
+sed -i 's/nova=nova:main/nova=nova_cli:main/' setup.py
+pip install --user --break-system-packages -e .
+```
+
 ## All Commands
 
 Run **`nova help`** to see the full command list and **Active Environment** (Config path, KB file path, Secrets path, AI host).
