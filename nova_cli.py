@@ -104,6 +104,8 @@ BANNER = f"""{C.ORANGE}{C.BOLD}
 #  ERROR DETECTION PATTERNS
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Keywords/phrases that indicate an error line (used to detect errors in pasted output).
+# When a line matches any pattern, it is considered an error signature for KB search.
 _ERROR_PATTERNS = [
     re.compile(r"(?i)Traceback \(most recent call last\)"),
     re.compile(r"(?i)(ModuleNotFoundError|ImportError|FileNotFoundError|PermissionError)"),
@@ -113,6 +115,7 @@ _ERROR_PATTERNS = [
     re.compile(r"(?i)(FATAL|PANIC|ABORT|SEGFAULT|core dumped)"),
     re.compile(r"(?i)(command not found|no such file|permission denied)"),
     re.compile(r"(?i)(BUILD FAILED|COMPILATION ERROR|LINK ERROR)"),
+    re.compile(r"=>\s*ERROR\s+\["),   # Docker build: => ERROR [stage-0 8/19] RUN ...
     re.compile(r"(?i)(failed|error|exception|denied|crash)"),
     re.compile(r"\b(401|403|404|500|502|503)\b"),
 ]
@@ -1214,7 +1217,8 @@ def cmd_help():
     print(f"  {'':<12} {'nova add-llm':<24} {'Add a new AI provider.':<38}")
     print(f"  {'':<12} {'nova rm <nick>':<24} {'Remove a provider profile.':<38}")
     print(sep)
-    print(f"  {'System':<12} {'nova list':<24} {'Show all paths and profile nicks.':<38}")
+    print(f"  {'System':<12} {'nova ano':<24} {'See the latest announcements.':<38}")
+    print(f"  {'':<12} {'nova list':<24} {'Show all paths and profile nicks.':<38}")
     print(f"  {'':<12} {'nova rm <n/idx>':<24} {'Delete profile nick or path.':<38}")
     print(f"  {'':<12} {'nova init':<24} {'Run the configuration wizard.':<38}")
     print(f"  {'':<12} {'nova config':<24} {'Show full active configuration.':<38}")
@@ -1354,6 +1358,49 @@ def _maybe_show_announcements():
         pass
 
 
+def _fetch_announcements():
+    """Fetch announcements from the repo. Returns list of announcements or None on failure."""
+    try:
+        req = urllib.request.Request(ANNOUNCEMENTS_URL)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data.get("announcements") or []
+    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, OSError):
+        return None
+
+
+def cmd_ano():
+    """nova ano — Fetch and show the latest announcements."""
+    print(f"\n  {C.ORANGE}{C.BOLD}📢  Fetching latest announcements...{C.RESET}\n")
+    announcements = _fetch_announcements()
+    if announcements is None:
+        print(f"  {C.YELLOW}Could not load announcements (network or server).{C.RESET}\n")
+        return
+    if not announcements:
+        print(f"  {C.DIM}No announcements at this time.{C.RESET}\n")
+        return
+    # Show newest first (by date if present)
+    def sort_key(a):
+        return (a.get("date") or "").strip(), (a.get("id") or "")
+    announcements = sorted(announcements, key=sort_key, reverse=True)
+    print(f"  {C.ORANGE}╔══════════════════════════════════════════════════════╗{C.RESET}")
+    print(f"  {C.ORANGE}║  {C.BOLD}📢  ANNOUNCEMENTS{C.ORANGE}                                    ║{C.RESET}")
+    print(f"  {C.ORANGE}╠══════════════════════════════════════════════════════╣{C.RESET}")
+    for a in announcements:
+        title = a.get("title") or "Announcement"
+        date = (a.get("date") or "").strip()
+        if date:
+            title = f"{title}  ({date})"
+        body = (a.get("body") or "").strip()
+        print(f"  {C.ORANGE}║{C.RESET}  {C.BOLD}{C.ORANGE}{title}{C.RESET}")
+        if body:
+            for line in body.splitlines():
+                print(f"  {C.ORANGE}║{C.RESET}  {line}")
+        print(f"  {C.ORANGE}║{C.RESET}")
+    print(f"  {C.ORANGE}╚══════════════════════════════════════════════════════╝{C.RESET}")
+    print()
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1378,6 +1425,10 @@ def main():
 
     if command in ("version", "--v", "-v", "--version"):
         cmd_version()
+        return
+
+    if command in ("ano", "announcements"):
+        cmd_ano()
         return
 
     if command in ("reload", "--r", "-r"):

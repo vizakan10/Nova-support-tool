@@ -176,7 +176,7 @@ $ nova use openai-gpt4
 
 ## Announcements
 
-**Simple:** You push updates to `announcements.json` → next day when users run `nova`, they see it. No push → nothing new.
+**Simple:** You push updates to `announcements.json` → next day when users run `nova`, they see it. No push → nothing new. Users can run **`nova ano`** anytime to fetch and view the latest announcements.
 
 On the first run of any `nova` command each day, Nova fetches `announcements.json` from the repo. New announcements (new `id`) are shown once. To announce something:
 
