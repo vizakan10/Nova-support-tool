@@ -230,13 +230,17 @@ def add_entry(kb_path, error, solution, command, added_by):
     Returns ``(True, entry_dict)`` on success,
     or ``(False, reason_string)`` on failure.
     """
+    if not kb_path or (isinstance(kb_path, str) and not kb_path.strip()):
+        return False, "KB path is required."
+    error = (error or "").strip() if isinstance(error, str) else str(error or "").strip()
+    solution = (solution or "").strip() if isinstance(solution, str) else str(solution or "").strip()
     if not error or not solution:
         return False, "Error and solution are required."
 
     resolve_conflicts(kb_path)
     data = load_kb(kb_path)
 
-    sanitized_error = sanitize(error.strip())
+    sanitized_error = sanitize(error)
 
     # Check for duplicates
     for existing in data:
@@ -245,9 +249,9 @@ def add_entry(kb_path, error, solution, command, added_by):
 
     entry = {
         "error": sanitized_error,
-        "solution": solution.strip(),
-        "command": command.strip() if command else "",
-        "added_by": added_by,
+        "solution": solution,
+        "command": (command or "").strip() if isinstance(command, str) else "",
+        "added_by": (added_by or "").strip() if isinstance(added_by, str) else str(added_by or ""),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -266,6 +270,8 @@ def delete_entry(kb_path, entry_id):
 
     Returns ``(True, None)`` on success, or ``(False, reason_string)`` on failure.
     """
+    if not kb_path or (isinstance(kb_path, str) and not kb_path.strip()):
+        return False, "KB path is required."
     resolve_conflicts(kb_path)
     data = load_kb(kb_path)
     try:

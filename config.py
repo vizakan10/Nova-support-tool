@@ -91,7 +91,10 @@ def _load_json(path, default=None):
         return default
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
+            data = json.load(fh)
+        if isinstance(default, dict) and not isinstance(data, dict):
+            return default
+        return data
     except (json.JSONDecodeError, IOError, OSError):
         return default
 
@@ -106,7 +109,7 @@ def _save_json(path, data):
 def load_config():
     """Load core config (active_kb, added_by, active_provider)."""
     cfg = _load_json(CONFIG_FILE)
-    if not cfg:
+    if not cfg or not isinstance(cfg, dict):
         return None
     
     # Migration: if old 'kb_path' exists but no 'active_kb'
@@ -163,7 +166,11 @@ def save_kbs(kbs):
 
 def add_kb_source(nickname, path):
     """Register a new Knowledge Base folder. Normalizes Windows -> /mnt when on WSL."""
+    if not path or (isinstance(path, str) and not path.strip()):
+        return
     path = _normalize_kb_path(path)
+    if not path:
+        return
     kbs = load_kbs()
     kbs[nickname] = os.path.abspath(path) if path else path
     save_kbs(kbs)
@@ -233,13 +240,19 @@ def list_all_kbs():
 
 def add_provider(nickname, provider_type, model, endpoint, api_key):
     """Register a new AI provider under *nickname*."""
+    nickname = (nickname or "").strip() if nickname is not None else ""
+    if not nickname:
+        return
+    model = (model or "").strip() if model is not None else ""
+    endpoint = (endpoint or "").strip() if endpoint is not None else ""
+    api_key = api_key if api_key is not None else ""
     providers = load_providers()
     secrets = load_secrets()
 
     providers[nickname] = {
-        "provider": provider_type,
+        "provider": (provider_type or "").strip() if provider_type else "",
         "model": model,
-        "endpoint": endpoint,
+        "endpoint": endpoint or (AI_PROVIDERS.get(provider_type, {}) or {}).get("endpoint", ""),
     }
     secrets[nickname] = api_key
 
@@ -542,7 +555,7 @@ def _add_provider_rich(q, style, p_type, set_active=False):
 
     add_provider(nickname, p_type, model, endpoint, api_key)
     if set_active:
-        cfg = load_config()
+        cfg = load_config() or {}
         cfg["active_provider"] = nickname
         save_config(cfg)
     return nickname
@@ -558,7 +571,7 @@ def _add_provider_basic(p_type, set_active=False):
 
     add_provider(nickname, p_type, model, endpoint, api_key)
     if set_active:
-        cfg = load_config()
+        cfg = load_config() or {}
         cfg["active_provider"] = nickname
         save_config(cfg)
     return nickname
@@ -608,6 +621,7 @@ def _ensure_kb_file(kb_path):
 
 
 def _print_summary(config):
+    config = config or {}
     active_kb = config.get("active_kb", "")
     kbs = load_kbs()
     active_path = kbs.get(active_kb, "N/A")
@@ -641,6 +655,9 @@ def config_path():
 
 def set_active_provider_model(model):
     """Update the active provider's model. Returns True if success."""
+    model = (model or "").strip()
+    if not model:
+        return False
     cfg = load_config()
     active = (cfg or {}).get("active_provider", "")
     if not active:
@@ -648,19 +665,20 @@ def set_active_provider_model(model):
     providers = load_providers()
     if active not in providers:
         return False
-    providers[active]["model"] = model.strip()
+    providers[active]["model"] = model
     save_providers(providers)
     return True
 
 
 def set_active_provider_apikey(api_key):
     """Update the active provider's API key. Returns True if success."""
+    api_key = (api_key or "").strip() if api_key is not None else ""
     cfg = load_config()
     active = (cfg or {}).get("active_provider", "")
     if not active:
         return False
     secrets = load_secrets()
-    secrets[active] = api_key.strip()
+    secrets[active] = api_key
     save_secrets(secrets)
     return True
 
