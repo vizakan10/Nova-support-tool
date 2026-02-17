@@ -453,6 +453,7 @@ def _setup_rich(q):
     if p_type and p_type != "Skip (no AI)":
         _add_provider_rich(q, style, p_type, set_active=True)
 
+    cfg = load_config() or {}
     _print_summary(cfg)
     return cfg
 
