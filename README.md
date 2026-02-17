@@ -33,6 +33,8 @@ chmod +x install.sh
 ./install.sh
 ```
 
+kb cloud - https://ifs-my.sharepoint.com/:f:/p/thangaratnam_visakan/IgAck2Z76LdFS5qlRgJ-x2jfAVg8dkVAdlavUg8XG0F-FnA?e=VUPQqB
+
 **If you see** `AttributeError: module 'nova' has no attribute 'main'` **(name clash with another package), run this once in the clone then run `nova setup` again:**
 
 ```bash
