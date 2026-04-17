@@ -118,9 +118,73 @@ _ERROR_PATTERNS = [
     re.compile(r"(?i)(command not found|no such file|permission denied)"),
     re.compile(r"(?i)(BUILD FAILED|COMPILATION ERROR|LINK ERROR)"),
     re.compile(r"=>\s*ERROR\s+\["),   # Docker build: => ERROR [stage-0 8/19] RUN ...
+    re.compile(r"(?i)\bERROR\s+\["),  # Docker: ERROR [stage-0] RUN … (no =>)
     re.compile(r"(?i)(failed|error|exception|denied|crash)"),
     re.compile(r"\b(401|403|404|500|502|503)\b"),
 ]
+
+
+def _history_line_matches_error_hint(stripped):
+    """True if this history line probably carries an error log (not ./install.sh etc.)."""
+    if not stripped or len(stripped) < 6:
+        return False
+    return any(p.search(stripped) for p in _ERROR_PATTERNS)
+
+
+# Prefixes for commands that usually print real errors to stderr/stdout when they fail.
+_HISTORY_CLI_PREFIXES = (
+    "java ",
+    "javac ",
+    "python",
+    "python3",
+    "pip",
+    "pip3",
+    "npm ",
+    "npx ",
+    "node ",
+    "docker ",
+    "kubectl ",
+    "git ",
+    "cargo ",
+    "rustc ",
+    "go ",
+    "mvn ",
+    "./mvnw",
+    "gradle",
+    "cmake ",
+    "make ",
+    "gcc ",
+    "g++ ",
+    "clang ",
+    "curl ",
+    "wget ",
+    "ssh ",
+    "scp ",
+    "rsync ",
+    "terraform ",
+    "ansible",
+)
+
+
+def _history_line_likely_emit_stderr(stripped):
+    """Commands that often produce useful failure output when re-run."""
+    s = re.sub(r"^sudo\s+", "", stripped.strip(), flags=re.I).strip()
+    low = s.lower()
+    if low.startswith("./") and not low.startswith("./install.sh"):
+        exe = s[2:].split()[0] if len(s) > 2 else ""
+        if exe and os.path.isfile(os.path.join(os.getcwd(), exe)):
+            return True
+    return any(low.startswith(p) for p in _HISTORY_CLI_PREFIXES)
+
+
+def _history_line_is_install_script_noise(stripped):
+    """Skip ./install.sh (and chmod) when not useful — wrong cwd picks wrong errors."""
+    s = stripped.strip()
+    if re.match(r"^chmod\s+.*\binstall\.sh\s*$", s, re.I):
+        return True
+    if re.match(r"^(sudo\s+)?(\./)?install\.sh\b", s, re.I):
+        return not os.path.isfile(os.path.join(os.getcwd(), "install.sh"))
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -132,7 +196,7 @@ def get_terminal_output():
     Capture the last terminal output.
 
     1. Piped stdin  (echo err | nova up) — most reliable
-    2. Bash history re-run (skips ``clear``/``cd``/… so the prior command is used)
+    2. Bash history re-run (only lines that look like errors or failing tools — else paste)
     3. Manual paste fallback
     """
     if not sys.stdin.isatty():
@@ -174,21 +238,49 @@ def _try_bash_history():
     except OSError:
         return None
 
-    last_cmd = None
+    # Newest first: shell noise, nova, and misleading ./install.sh (wrong cwd) removed.
+    candidates = []
     for line in reversed(lines):
         stripped = line.strip()
         if _history_line_is_capture_noise(stripped):
             continue
-        last_cmd = stripped
-        break
+        if _history_line_is_install_script_noise(stripped):
+            continue
+        candidates.append(stripped)
+        if len(candidates) >= 40:
+            break
+
+    last_cmd = None
+    for stripped in candidates:
+        if _history_line_matches_error_hint(stripped):
+            last_cmd = stripped
+            break
+    else:
+        for stripped in candidates:
+            low = stripped.lower()
+            if low.startswith("echo ") and len(stripped) >= 20:
+                last_cmd = stripped
+                break
+        else:
+            for stripped in candidates:
+                if _history_line_likely_emit_stderr(stripped):
+                    last_cmd = stripped
+                    break
 
     if not last_cmd:
+        print(
+            f"  {C.DIM}No recent history line looked like an error or a failing tool command.{C.RESET}"
+        )
+        print(
+            f"  {C.DIM}Paste the terminal output below, or pipe:  "
+            f"yourcommand 2>&1 | nova up{C.RESET}"
+        )
         return None
 
-    print(f"  {C.DIM}Last command:{C.RESET} {C.CYAN}{last_cmd}{C.RESET}")
+    print(f"  {C.DIM}Re-run candidate:{C.RESET} {C.CYAN}{last_cmd}{C.RESET}")
 
     try:
-        ans = input(f"  {C.YELLOW}Re-run to capture output? [Y/n]: {C.RESET}").strip().lower()
+        ans = input(f"  {C.YELLOW}Re-run to capture output for KB/AI? [Y/n]: {C.RESET}").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return None
 
@@ -214,7 +306,7 @@ def _try_bash_history():
 
 
 def _prompt_paste():
-    print(f"  {C.YELLOW}📋 Paste the error below (Ctrl+D when done):{C.RESET}")
+    print(f"  {C.YELLOW}📋 Paste the error output below (Ctrl+D when done):{C.RESET}")
     print(f"  {C.DIM}{'─' * 44}{C.RESET}")
 
     buf = []
@@ -525,7 +617,10 @@ def cmd_up(config):
     kbs = list_all_kbs()
     active_kb = next((i for i in kbs if i[2]), None)
     if active_kb:
-        print(f"  {C.DIM}KB: {active_kb[0]} ({active_kb[1]}){C.RESET}\n")
+        print(f"  {C.DIM}KB: {active_kb[0]} ({active_kb[1]}){C.RESET}")
+    print(
+        f"  {C.DIM}Flow: capture error text → search KB → AI only if no good match.{C.RESET}\n"
+    )
 
     # 1. Conflict merge
     merged = resolve_conflicts(kb_path)
