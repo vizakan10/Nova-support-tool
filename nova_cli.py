@@ -372,6 +372,10 @@ def call_ai_ask(query, ai_config):
     try:
         with urllib.request.urlopen(req, timeout=25) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        msg = exc.read().decode("utf-8", errors="replace")[:400]
+        print(f"  {C.RED}⚠  AI API error ({exc.code}): {msg}{C.RESET}")
+        return None
     except Exception as exc:
         print(f"  {C.RED}⚠  AI request failed: {exc}{C.RESET}")
         return None
