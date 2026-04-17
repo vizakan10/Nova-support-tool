@@ -250,22 +250,17 @@ def _try_bash_history():
         if len(candidates) >= 40:
             break
 
+    # One pass, newest first: first line matching *any* rule wins. (Previously we
+    # scanned all history for error-shaped text first, so an old ``echo 'ERROR …'``
+    # beat a fresh ``java …`` command from the same session.)
     last_cmd = None
     for stripped in candidates:
-        if _history_line_matches_error_hint(stripped):
+        low = stripped.lower()
+        if _history_line_likely_emit_stderr(stripped) or _history_line_matches_error_hint(
+            stripped
+        ) or (low.startswith("echo ") and len(stripped) >= 20):
             last_cmd = stripped
             break
-    else:
-        for stripped in candidates:
-            low = stripped.lower()
-            if low.startswith("echo ") and len(stripped) >= 20:
-                last_cmd = stripped
-                break
-        else:
-            for stripped in candidates:
-                if _history_line_likely_emit_stderr(stripped):
-                    last_cmd = stripped
-                    break
 
     if not last_cmd:
         print(
