@@ -48,6 +48,7 @@ from config import (
     save_current_as_profile,
     CONFIG_FILE,
     AI_PROVIDERS,
+    NOVA_HTTP_USER_AGENT,
 )
 from kb_manager import (
     fuzzy_search,
@@ -301,6 +302,7 @@ def call_ai(error_text, ai_config):
             "Authorization": f"Bearer {api_key}",
         }
 
+    headers["User-Agent"] = NOVA_HTTP_USER_AGENT
     payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(endpoint, data=payload, headers=headers)
 
@@ -367,6 +369,7 @@ def call_ai_ask(query, ai_config):
             "temperature": 0.3,
         }
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    headers["User-Agent"] = NOVA_HTTP_USER_AGENT
     payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(endpoint, data=payload, headers=headers)
     try:

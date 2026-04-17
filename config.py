@@ -16,6 +16,10 @@ PROVIDERS_FILE = os.path.join(CONFIG_DIR, "providers.json")
 SECRETS_FILE = os.path.join(CONFIG_DIR, "secrets.json")
 KBS_FILE = os.path.join(CONFIG_DIR, "kb_sources.json")
 
+# Default urllib User-Agent (Python-urllib/3.x) is often blocked by CDN/WAF rules
+# in front of LLM APIs (e.g. Cloudflare 1010 / "browser signature").
+NOVA_HTTP_USER_AGENT = "Nova-CLI/2.0.0"
+
 # ─── AI Provider Defaults ────────────────────────────────────────────────────
 AI_PROVIDERS = {
     "groq": {
@@ -602,6 +606,8 @@ def test_provider_connection(nickname=None):
     else:
         body = {"model": info["model"], "messages": [{"role": "user", "content": "hi"}], "max_tokens": 10}
         headers["Authorization"] = f"Bearer {api_key}"
+
+    headers["User-Agent"] = NOVA_HTTP_USER_AGENT
 
     try:
         req = urllib.request.Request(info["endpoint"], data=json.dumps(body).encode("utf-8"), headers=headers)
