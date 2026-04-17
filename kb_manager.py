@@ -78,6 +78,48 @@ def load_kb(kb_path):
         return []
 
 
+def load_kb_for_write(kb_path):
+    """
+    Load kb.json before appending or replacing entries.
+
+    Unlike ``load_kb``, this does **not** treat a broken file as empty: returning
+    ``([], None)`` would cause ``add_entry`` to overwrite the whole KB with one row.
+
+    Returns:
+        ``(entries, None)`` — ``entries`` is a list (possibly empty) to mutate and save.
+        ``(None, err)`` — existing file is unreadable or not a JSON array; caller must
+        not save over it (repair / OneDrive version history first).
+    """
+    path = _kb_file(kb_path)
+    if not os.path.exists(path):
+        return [], None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        return None, f"Could not read kb.json: {exc}. Restore or fix the file before saving."
+
+    if not raw.strip():
+        return [], None
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, (
+            "kb.json is not valid JSON (often a OneDrive partial sync). "
+            "Nova will not overwrite it. Fix the file or restore a previous version, then retry. "
+            f"({exc})"
+        )
+
+    if not isinstance(data, list):
+        return None, (
+            "kb.json must be a JSON array of entry objects. "
+            "Nova will not replace it with a new list until you fix the structure."
+        )
+
+    return data, None
+
+
 def save_kb(kb_path, data):
     """Write *data* (list of dicts) to kb.json atomically."""
     path = _kb_file(kb_path)
@@ -131,8 +173,10 @@ def resolve_conflicts(kb_path):
     if not conflict_files:
         return 0
 
-    # Load main KB
-    main_data = load_kb(kb_path)
+    # Load main KB — do not merge if main file is corrupt (would risk losing data)
+    main_data, main_err = load_kb_for_write(kb_path)
+    if main_err:
+        return 0
 
     # Build a dedup key set from existing entries
     existing_keys = set()
@@ -238,7 +282,9 @@ def add_entry(kb_path, error, solution, command, added_by):
         return False, "Error and solution are required."
 
     resolve_conflicts(kb_path)
-    data = load_kb(kb_path)
+    data, load_err = load_kb_for_write(kb_path)
+    if load_err:
+        return False, load_err
 
     sanitized_error = sanitize(error)
 
@@ -273,7 +319,9 @@ def delete_entry(kb_path, entry_id):
     if not kb_path or (isinstance(kb_path, str) and not kb_path.strip()):
         return False, "KB path is required."
     resolve_conflicts(kb_path)
-    data = load_kb(kb_path)
+    data, load_err = load_kb_for_write(kb_path)
+    if load_err:
+        return False, load_err
     try:
         idx = int(entry_id)
         if idx < 1 or idx > len(data):

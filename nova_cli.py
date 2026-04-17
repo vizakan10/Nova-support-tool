@@ -53,6 +53,7 @@ from config import (
 from kb_manager import (
     fuzzy_search,
     load_kb,
+    load_kb_for_write,
     add_entry,
     delete_entry,
     resolve_conflicts,
@@ -130,8 +131,8 @@ def get_terminal_output():
     """
     Capture the last terminal output.
 
-    1. Piped stdin  (echo err | nova up)
-    2. Bash history re-run
+    1. Piped stdin  (echo err | nova up) — most reliable
+    2. Bash history re-run (skips ``clear``/``cd``/… so the prior command is used)
     3. Manual paste fallback
     """
     if not sys.stdin.isatty():
@@ -144,6 +145,21 @@ def get_terminal_output():
         return output
 
     return _prompt_paste()
+
+
+def _history_line_is_capture_noise(stripped):
+    """True if this history line is not a sensible 're-run to capture error' target."""
+    if not stripped:
+        return True
+    if stripped.startswith("nova ") or stripped == "nova":
+        return True
+    low = stripped.lower()
+    # Shell housekeeping — often the newest line right before ``nova up``, hiding ``echo …``.
+    if low in ("clear", "reset", "cls", "exit", "logout", "pwd", "history", "fc"):
+        return True
+    if low == "cd" or low.startswith("cd "):
+        return True
+    return False
 
 
 def _try_bash_history():
@@ -161,9 +177,10 @@ def _try_bash_history():
     last_cmd = None
     for line in reversed(lines):
         stripped = line.strip()
-        if stripped and not stripped.startswith("nova ") and stripped != "nova":
-            last_cmd = stripped
-            break
+        if _history_line_is_capture_noise(stripped):
+            continue
+        last_cmd = stripped
+        break
 
     if not last_cmd:
         return None
@@ -958,7 +975,10 @@ def cmd_kb_list():
         print(f"  {C.RED}❌ Active KB not configured. Run:  nova setup{C.RESET}")
         return
     resolve_conflicts(kb_path)
-    data = load_kb(kb_path)
+    data, kb_err = load_kb_for_write(kb_path)
+    if kb_err:
+        print(f"  {C.RED}❌ {kb_err}{C.RESET}")
+        return
     print(f"\n  {C.ORANGE}{C.BOLD}📚 Knowledge Base — {len(data)} entries{C.RESET}\n")
     print(f"  {C.DIM}{'ID':<5} {'Error':<50} {'Solution':<40}{C.RESET}")
     print(f"  {C.ORANGE}{'─' * 95}{C.RESET}")
@@ -1004,7 +1024,10 @@ def cmd_kb_search(query=None):
         print(f"  {C.YELLOW}⚠  No query.{C.RESET}")
         return
     resolve_conflicts(kb_path)
-    data = load_kb(kb_path)
+    data, kb_err = load_kb_for_write(kb_path)
+    if kb_err:
+        print(f"  {C.RED}❌ {kb_err}{C.RESET}")
+        return
     results = fuzzy_search(query, data, threshold=60)
     print(f"\n  {C.ORANGE}{C.BOLD}🔍 Search: \"{query[:50]}...\"{C.RESET}\n" if len(query) > 50 else f"\n  {C.ORANGE}{C.BOLD}🔍 Search: \"{query}\"{C.RESET}\n")
     if not results:
