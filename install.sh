@@ -1,9 +1,19 @@
 #!/bin/bash
 # Nova CLI — one-shot installer
-# Usage: git clone ... && cd Nova-support-tool && chmod +x install.sh && ./install.sh
+#   curl -fsSL https://raw.githubusercontent.com/vizakan10/Nova-support-tool/main/install.sh | bash
+#   git clone ... && cd Nova-support-tool && ./install.sh
 
 set -euo pipefail
 
+# Self-fix CRLF when executed as a file (skipped for curl | bash stdin)
+if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "bash" && -f "${BASH_SOURCE[0]}" ]]; then
+    sed -i 's/\r//' "${BASH_SOURCE[0]}" 2>/dev/null \
+        || sed -i '' 's/\r//' "${BASH_SOURCE[0]}" 2>/dev/null \
+        || true
+fi
+
+REPO_URL="https://github.com/vizakan10/Nova-support-tool.git"
+REPO_DIR="${NOVA_SRC:-$HOME/.nova/nova-src}"
 HOOKS_FILE="$HOME/.nova/nova_hooks.sh"
 HOOK_LINE="source ~/.nova/nova_hooks.sh"
 LOCAL_BIN="$HOME/.local/bin"
@@ -20,19 +30,64 @@ step_ok() {
     echo "✅ $1"
 }
 
+_strip_crlf() {
+    local f="$1"
+    [[ -f "$f" ]] || return 0
+    if ! sed -i 's/\r//' "$f" 2>/dev/null; then
+        if ! sed -i '' 's/\r//' "$f" 2>/dev/null; then
+            die "Could not strip \\r from $f"
+        fi
+    fi
+}
+
+_in_repo() {
+    [[ -f "${1}/setup.py" && -f "${1}/nova_cli.py" ]]
+}
+
+# curl | bash: clone source and re-exec the on-disk install.sh
+if [[ "${BASH_SOURCE[0]:-}" == "bash" ]] || [[ ! -f "${BASH_SOURCE[0]:-}" ]]; then
+    echo "▶ Fetching Nova source..."
+    if ! command -v git &>/dev/null; then
+        die "git is required for curl install. Install git first, e.g.:  sudo apt install git"
+    fi
+    mkdir -p "$(dirname "$REPO_DIR")"
+    if [[ -d "$REPO_DIR/.git" ]]; then
+        git -C "$REPO_DIR" pull --ff-only || die "git pull failed in $REPO_DIR"
+        step_ok "Updated existing clone at $REPO_DIR"
+    else
+        git clone "$REPO_URL" "$REPO_DIR" || die "git clone failed"
+        step_ok "Cloned to $REPO_DIR"
+    fi
+    exec bash "$REPO_DIR/install.sh"
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+if ! _in_repo "$SCRIPT_DIR"; then
+    die "Not a Nova repo (missing setup.py). Run from a clone or use curl | bash."
+fi
+
 echo "╔══════════════════════════════════════════╗"
 echo "║          🚀  Nova CLI Installer          ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-# ── 1. Python 3 ─────────────────────────────────────────────────────────────
+# ── 1. Strip CRLF from all repo shell scripts ───────────────────────────────
+echo "▶ Normalizing shell script line endings..."
+for sh in "$SCRIPT_DIR"/*.sh; do
+    [[ -f "$sh" ]] && _strip_crlf "$sh"
+done
+step_ok "Shell scripts use Unix line endings"
+
+# ── 2. Python 3 ─────────────────────────────────────────────────────────────
 echo "▶ Checking Python 3..."
 if ! command -v python3 &>/dev/null; then
     die "Python 3 is not installed. Install it first, e.g.:  sudo apt install python3 python3-pip"
 fi
 step_ok "Python 3 found: $(python3 --version 2>&1)"
 
-# ── 2. PATH (~/.local/bin) ──────────────────────────────────────────────────
+# ── 3. PATH (~/.local/bin) ──────────────────────────────────────────────────
 echo "▶ Configuring PATH..."
 if [[ ":${PATH}:" != *":${LOCAL_BIN}:"* ]]; then
     if [[ -f "$BASHRC" ]] && grep -qF 'Nova CLI Path' "$BASHRC" 2>/dev/null; then
@@ -49,7 +104,7 @@ if [[ ":${PATH}:" != *":${LOCAL_BIN}:"* ]]; then
 fi
 export PATH="${LOCAL_BIN}:${PATH}"
 
-# ── 3. Pip install ──────────────────────────────────────────────────────────
+# ── 4. Pip install ──────────────────────────────────────────────────────────
 echo "▶ Installing Nova CLI (pip)..."
 if ! python3 -m pip install --user --break-system-packages -e .; then
     die "pip install failed. Check errors above and try again."
@@ -59,7 +114,7 @@ if ! command -v nova &>/dev/null; then
 fi
 step_ok "Nova CLI installed ($(nova version 2>/dev/null | tr -d '\n' || echo 'nova'))"
 
-# ── 4. Shell hooks ────────────────────────────────────────────────────────────
+# ── 5. Shell hooks ────────────────────────────────────────────────────────────
 echo "▶ Installing shell hooks..."
 if ! nova install-hooks; then
     die "nova install-hooks failed."
@@ -67,17 +122,8 @@ fi
 if [[ ! -f "$HOOKS_FILE" ]]; then
     die "Hooks file missing after install: $HOOKS_FILE"
 fi
+_strip_crlf "$HOOKS_FILE"
 step_ok "Hooks installed to $HOOKS_FILE"
-
-# ── 5. Strip CRLF (WSL / Windows checkout) ───────────────────────────────────
-echo "▶ Normalizing hook line endings..."
-if ! sed -i 's/\r$//' "$HOOKS_FILE" 2>/dev/null; then
-    # macOS/BSD sed fallback (unlikely on WSL, but safe)
-    if ! sed -i '' 's/\r$//' "$HOOKS_FILE" 2>/dev/null; then
-        die "Could not strip \\r from $HOOKS_FILE"
-    fi
-fi
-step_ok "Hook file uses Unix line endings"
 
 # ── 6. Ensure ~/.bashrc sources hooks ───────────────────────────────────────
 echo "▶ Configuring ~/.bashrc..."
@@ -106,12 +152,9 @@ step_ok "Setup complete"
 
 # ── 8. Done ─────────────────────────────────────────────────────────────────
 echo ""
-echo " ✓ Nova installed and ready"
+echo " ✓ Nova installed successfully"
 echo ""
-echo " Important: open a new terminal, or run:"
-echo "   source ~/.bashrc"
-echo ""
-echo " Then try it:"
-echo "   run any command that fails"
+echo " Open a new terminal and try:"
+echo "   python3 -c \"import nosuchmodule\""
 echo "   nova up"
 echo ""

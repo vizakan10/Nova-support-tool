@@ -226,10 +226,18 @@ def _read_last_output(session_dir, max_wait=0.4, interval=0.05):
         time.sleep(interval)
 
 
+_OUTPUT_NOT_CAPTURED = (
+    "(Note: command output was not captured by shell hooks. "
+    "Diagnosis will use the command only.)"
+)
+
+
 def _try_hook_capture(quiet=False):
     """Read last command and output captured by nova_hooks.sh (no command re-run).
 
     Returns (combined_text, last_cmd) or None on failure.
+    If output is missing but the command was captured, still returns the command
+    with a note so AI can attempt a fix (no paste or re-run fallback).
     """
     session_dir = _nova_session_dir()
 
@@ -261,10 +269,13 @@ def _try_hook_capture(quiet=False):
     last_output = _read_last_output(session_dir).strip()
     if not last_output:
         print(
-            f"  {C.YELLOW}Output not captured yet. Make sure you opened a new terminal "
-            f"after running nova install-hooks, then try again.{C.RESET}"
+            f"  {C.YELLOW}⚠  Command output was not captured; using command only.{C.RESET}"
         )
-        return None
+        print(
+            f"  {C.DIM}   Open a new terminal after nova install-hooks for full capture.{C.RESET}"
+        )
+        combined = "\n".join([f"$ {last_cmd}", _OUTPUT_NOT_CAPTURED])
+        return combined, last_cmd
 
     if not quiet:
         print(f"  {C.DIM}Scanning:{C.RESET} {C.CYAN}{last_cmd}{C.RESET}")
@@ -661,7 +672,7 @@ def _print_up_kb_hit(entry):
     solution = entry.get("solution", "")
     command = entry.get("command", "")
     print()
-    print(f"  {C.GREEN}⚡ Found in knowledge base{C.RESET}")
+    print(f"  {C.GREEN}⚡ Knowledge Base{C.RESET}")
     print()
     print(f"  {C.BOLD}Solution:{C.RESET} {solution}")
     if command:
