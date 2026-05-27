@@ -47,5 +47,96 @@
     "command": "In Dockerfile: use --network=host for the build, or COPY a pre-scanned known_hosts file.",
     "added_by": "support_kairos",
     "timestamp": "2026-02-16T00:00:00+00:00"
+  },
+  {
+    "error": "ModuleNotFoundError: No module named 'nosuchmodule'",
+    "solution": "The module 'nosuchmodule' does not exist. This is a test entry to verify nova up KB lookup works correctly.",
+    "command": "echo 'KB hit confirmed — nova up is working!'",
+    "added_by": "nova-seed",
+    "timestamp": "2026-02-16T00:00:01+00:00"
+  },
+  {
+    "error": "kairos: az kubectl docker command not found after install",
+    "solution": "Initial Kairos setup did not complete fully. Delete ~/.kairos and re-run kairos to trigger first-time setup again.",
+    "command": "rm -rf ~/.kairos && kairos",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:00+00:00"
+  },
+  {
+    "error": "kairos cluster create fails immediately",
+    "solution": "Tooling not installed or Azure login not completed. List and install all tools, then login to Azure.",
+    "command": "kairos tools list && kairos tools install --all && az login --use-device-code",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:01+00:00"
+  },
+  {
+    "error": "kairos WSL setup fails on my machine",
+    "solution": "WSL integration or distro state is broken. Shut down WSL to reset networking and integration.",
+    "command": "wsl --shutdown",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:02+00:00"
+  },
+  {
+    "error": "kairos missing app.json",
+    "solution": "app.json was never generated. Run the app.json creation script from nga-local-dev. File must exist at ~/.kairos/app.json.",
+    "command": "Run the app.json creation script from nga-local-dev",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:03+00:00"
+  },
+  {
+    "error": "kairos CLI version shows old value after update",
+    "solution": "app.json version mismatch. Re-run the creation script and update Kairos.",
+    "command": "kairos update",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:04+00:00"
+  },
+  {
+    "error": "kairos cluster created but services don't start",
+    "solution": "Cluster up does not mean services are healthy. List services and install any missing ones individually.",
+    "command": "kairos cluster services list",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:05+00:00"
+  },
+  {
+    "error": "event-outbox install fails Kyverno webhook error",
+    "solution": "Required CRDs (e.g. ServiceMonitor) are missing. Install the Prometheus/monitoring stack first before event-outbox.",
+    "command": "kairos cluster services list",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:06+00:00"
+  },
+  {
+    "error": "cannot access local endpoints 127.0.0.1 nip.io cluster unreachable from browser",
+    "solution": "WSL networking glitch. Shut down WSL to reset — the issue usually resolves without a full reinstall.",
+    "command": "wsl --shutdown",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:07+00:00"
+  },
+  {
+    "error": "Azure Key Vault access fails during cluster create",
+    "solution": "Missing Azure subscription access. Check which accounts are available and ensure you are on the correct subscription.",
+    "command": "az account list -o table",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:08+00:00"
+  },
+  {
+    "error": "go mod download fails SSH port 22 blocked",
+    "solution": "SSH port 22 is blocked on your network. Configure Git/SSH to use port 443 instead.",
+    "command": "git config --global url.\"https://\".insteadOf git://",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:09+00:00"
+  },
+  {
+    "error": "kairos local IAM token missing tenantId",
+    "solution": "Local IAM always requires tenant context — tokens without tenantId are not supported. Each tenant is isolated by design.",
+    "command": "",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:10+00:00"
+  },
+  {
+    "error": "kairos v0.6 broke older examples setup",
+    "solution": "Kairos v0.6 transitioned from MongoDB to Postgres. Some docs and examples are outdated. Update your setup scripts to use Postgres.",
+    "command": "kairos update",
+    "added_by": "kairos-kb",
+    "timestamp": "2026-02-16T00:01:11+00:00"
   }
 ]

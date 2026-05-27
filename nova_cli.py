@@ -1514,6 +1514,79 @@ def cmd_kb_search(query=None):
         display_solution(entry, score=score, source="KB")
 
 
+# ── nova search ──────────────────────────────────────────────────────────────
+
+def cmd_search(config, query=None):
+    """nova search [query] — Ask anything; KB first, AI fallback."""
+    kb_path = get_active_kb_path()
+    if not kb_path or not os.path.isdir(kb_path):
+        print(f"  {C.RED}❌ Active KB not configured. Run:  nova setup{C.RESET}")
+        return
+
+    if not query or not query.strip():
+        try:
+            query = input(f"  {C.BOLD}Search: {C.RESET}").strip()
+        except (EOFError, KeyboardInterrupt):
+            return
+    if not query:
+        print(f"  {C.YELLOW}⚠  No query.{C.RESET}")
+        return
+
+    print(f"\n  {C.ORANGE}{C.BOLD}🔍 \"{query}\"{C.RESET}\n")
+
+    resolve_conflicts(kb_path)
+    data, kb_err = load_kb_for_write(kb_path)
+    if kb_err:
+        print(f"  {C.RED}❌ {kb_err}{C.RESET}")
+        return
+
+    results = fuzzy_search(query, data, threshold=55)
+    if results:
+        print(f"  {C.GREEN}⚡ Knowledge Base  {C.DIM}({len(results)} match{'es' if len(results) > 1 else ''}){C.RESET}\n")
+        for entry, score in results[:5]:
+            solution = entry.get("solution", "")
+            command  = entry.get("command", "")
+            error    = entry.get("error", "")
+            print(f"  {C.BOLD}{error[:70]}{C.RESET}")
+            print(f"  {C.DIM}→{C.RESET} {solution}")
+            if command:
+                print(f"  {C.BOLD}Command:{C.RESET} {C.CYAN}{command}{C.RESET}")
+            print(f"  {C.DIM}Match: {score}%{C.RESET}")
+            print()
+        best_cmd = results[0][0].get("command", "")
+        if best_cmd:
+            _run_command_up(best_cmd)
+        return
+
+    # No KB match — ask AI
+    ai_config = get_active_ai_config()
+    if not ai_config:
+        print(f"  {C.YELLOW}No KB matches and no AI configured. Run:  nova setup{C.RESET}")
+        return
+
+    print(f"  {C.CYAN}⟳ Not in KB — asking AI...{C.RESET}")
+    print(f"  {C.DIM}{'─' * 44}{C.RESET}")
+    sys.stdout.write("  ")
+    sys.stdout.flush()
+    ai_result = call_ai_stream(query, ai_config)
+    if ai_result is None:
+        ai_result = call_ai(query, ai_config)
+    if ai_result and ai_result.get("solution"):
+        if not call_ai_stream:
+            _print_up_fix_lines(ai_result["solution"], ai_result.get("command", ""))
+        _run_command_up(ai_result.get("command", ""))
+        if _ask_yn("Save to KB?", default_yes=False):
+            ok, res = add_entry(
+                kb_path, query,
+                ai_result["solution"],
+                ai_result.get("command", ""),
+                config.get("added_by", "unknown"),
+            )
+            print(f"  {C.GREEN}✅ Saved.{C.RESET}" if ok else f"  {C.YELLOW}⚠  {res}{C.RESET}")
+        return
+    print(f"  {C.YELLOW}⚠  AI couldn't answer. Try  nova ask  for a direct question.{C.RESET}")
+
+
 # ── nova kb path ──────────────────────────────────────────────────────────────
 
 def cmd_kb_path(new_path=None):
@@ -1704,6 +1777,7 @@ def cmd_help():
     print(f"  {C.BOLD}{'Category':<12} {'Command':<24} {'Description':<38}{C.RESET}")
     print(sep)
     print(f"  {'Support':<12} {'nova up':<24} {'Solves last terminal error (KB → AI).':<38}")
+    print(f"  {'':<12} {'nova search [q]':<24} {'Ask anything — KB first, AI fallback.':<38}")
     print(f"  {'':<12} {'nova fix':<24} {'Paste error, get solution instantly.':<38}")
     print(f"  {'':<12} {'nova ask / -a':<24} {'Ask Nova AI a direct question.':<38}")
     print(f"  {'':<12} {'nova solve':<24} {'Review history, add custom fixes.':<38}")
@@ -2102,6 +2176,9 @@ def main():
         cmd_add(config)
     elif command == "fix":
         cmd_fix(config)
+    elif command in ("search", "s"):
+        query = " ".join(args[1:]).strip() if len(args) > 1 else None
+        cmd_search(config, query)
     elif command in ("ask", "-a"):
         query = " ".join(args[1:]).strip() if len(args) > 1 else None
         cmd_ask(config, query)
