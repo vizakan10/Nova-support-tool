@@ -127,81 +127,6 @@ _ERROR_PATTERNS = [
 ]
 
 
-def _history_line_matches_error_hint(stripped):
-    """True if this history line probably carries an error log (not ./install.sh etc.)."""
-    if not stripped or len(stripped) < 6:
-        return False
-    return any(p.search(stripped) for p in _ERROR_PATTERNS)
-
-
-# Prefixes for commands that usually print real errors to stderr/stdout when they fail.
-_HISTORY_CLI_PREFIXES = (
-    "java ",
-    "javac ",
-    "python",
-    "python3",
-    "pip",
-    "pip3",
-    "npm ",
-    "npx ",
-    "node ",
-    "docker ",
-    "kubectl ",
-    "git ",
-    "cargo ",
-    "rustc ",
-    "go ",
-    "mvn ",
-    "./mvnw",
-    "gradle",
-    "cmake ",
-    "make ",
-    "gcc ",
-    "g++ ",
-    "clang ",
-    "curl ",
-    "wget ",
-    "ssh ",
-    "scp ",
-    "rsync ",
-    "terraform ",
-    "ansible",
-)
-
-
-def _history_line_likely_emit_stderr(stripped):
-    """Commands that often produce useful failure output when re-run."""
-    s = re.sub(r"^sudo\s+", "", stripped.strip(), flags=re.I).strip()
-    low = s.lower()
-
-    # Typos without a space after the binary (``java--version``, ``java--uision``)
-    # must still count as that tool — otherwise ``git pull`` wins in history order.
-    if re.match(r"^java(?:[\s\-]|$)", s, re.I):
-        return True
-    if re.match(r"^javac(?:[\s\-]|$)", s, re.I):
-        return True
-    if re.match(r"^python\d*(?:[\s\-]|$)", s, re.I):
-        return True
-    if re.match(r"^node(?:[\s\-]|$)", s, re.I):
-        return True
-
-    if low.startswith("./") and not low.startswith("./install.sh"):
-        exe = s[2:].split()[0] if len(s) > 2 else ""
-        if exe and os.path.isfile(os.path.join(os.getcwd(), exe)):
-            return True
-    return any(low.startswith(p) for p in _HISTORY_CLI_PREFIXES)
-
-
-def _history_line_is_install_script_noise(stripped):
-    """Skip ./install.sh (and chmod) when not useful — wrong cwd picks wrong errors."""
-    s = stripped.strip()
-    if re.match(r"^chmod\s+.*\binstall\.sh\s*$", s, re.I):
-        return True
-    if re.match(r"^(sudo\s+)?(\./)?install\.sh\b", s, re.I):
-        return not os.path.isfile(os.path.join(os.getcwd(), "install.sh"))
-    return False
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 #  TERMINAL OUTPUT CAPTURE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -219,14 +144,26 @@ def _nova_session_dir():
     return os.path.join(os.path.expanduser("~/.nova/session"), f"nova_{ppid}")
 
 
-_LIKELY_PASSWORD_CMD = re.compile(r"^[A-Za-z0-9@#$!_%^&*]{6,30}$")
+_PASSWORD_CMD_BLOCKLIST = frozenset({
+    "docker", "python", "python3", "node", "npm", "git", "make", "gradle",
+    "kubectl", "bash", "sh", "sudo", "apt", "pip", "curl", "wget", "ls", "cd",
+    "cat", "grep", "vim", "nano", "false", "true",
+})
 
 
 def _cmd_looks_like_password(cmd):
     """True if cmd looks like an accidental bare password entry (no spaces)."""
     if not cmd or " " in cmd:
         return False
-    return bool(_LIKELY_PASSWORD_CMD.match(cmd))
+    if len(cmd) < 8 or len(cmd) > 30:
+        return False
+    if cmd.lower() in _PASSWORD_CMD_BLOCKLIST:
+        return False
+    if not re.search(r"[A-Za-z]", cmd):
+        return False
+    if not re.search(r"\d", cmd):
+        return False
+    return bool(re.match(r"^[A-Za-z0-9@#$!_%^&*]+$", cmd))
 
 
 def _clear_session_sensitive(session_dir):
@@ -333,21 +270,6 @@ def _try_hook_capture(quiet=False):
         print(f"  {C.DIM}Scanning:{C.RESET} {C.CYAN}{last_cmd}{C.RESET}")
 
     return "\n".join([f"$ {last_cmd}", last_output]), last_cmd
-
-
-def _history_line_is_capture_noise(stripped):
-    """True if this history line is not a sensible 're-run to capture error' target."""
-    if not stripped:
-        return True
-    if stripped.startswith("nova ") or stripped == "nova":
-        return True
-    low = stripped.lower()
-    # Shell housekeeping — often the newest line right before ``nova up``, hiding ``echo …``.
-    if low in ("clear", "reset", "cls", "exit", "logout", "pwd", "history", "fc"):
-        return True
-    if low == "cd" or low.startswith("cd "):
-        return True
-    return False
 
 
 def _prompt_paste():
@@ -903,55 +825,53 @@ def _run_command(command):
 def cmd_up(config):
     """nova up — Error Intercept Protocol."""
     t0 = time.monotonic()
+    try:
+        kb_path = get_active_kb_path()
+        if not kb_path or not os.path.isdir(kb_path):
+            print(f"  {C.RED}❌ Active KB not found or not configured.{C.RESET}")
+            print(f"  {C.DIM}   Run:  nova setup  or  nova use-kb <nickname>{C.RESET}")
+            return
 
-    if not get_active_ai_config():
-        print(f"\n  {C.RED}No AI provider configured. Run: nova setup{C.RESET}\n")
-        return
+        raw = None
+        last_cmd = ""
+        error_sig = ""
+        results = []
+        merged = 0
 
-    kb_path = get_active_kb_path()
-    if not kb_path or not os.path.isdir(kb_path):
-        print(f"  {C.RED}❌ Active KB not found or not configured.{C.RESET}")
-        print(f"  {C.DIM}   Run:  nova setup  or  nova use-kb <nickname>{C.RESET}")
-        return
+        with _Spinner("Scanning..."):
+            merged = resolve_conflicts(kb_path)
+            captured = _try_hook_capture(quiet=True)
+            if captured:
+                raw, last_cmd = captured
+            if raw:
+                error_sig = detect_error(raw) or raw.strip()[:250]
+                kb_data = load_kb(kb_path)
+                results = fuzzy_search(error_sig, kb_data, threshold=70)
 
-    raw = None
-    last_cmd = ""
-    error_sig = ""
-    results = []
-    merged = 0
+        if not raw:
+            return
 
-    with _Spinner("Scanning..."):
-        merged = resolve_conflicts(kb_path)
-        captured = _try_hook_capture(quiet=True)
-        if captured:
-            raw, last_cmd = captured
-        if raw:
-            error_sig = detect_error(raw) or raw.strip()[:250]
-            kb_data = load_kb(kb_path)
-            results = fuzzy_search(error_sig, kb_data, threshold=70)
+        _print_up_header(last_cmd)
 
-    if not raw:
-        _print_done_footer(t0)
-        return
+        if merged:
+            print(f"  {C.DIM}Merged {merged} OneDrive conflict entries.{C.RESET}")
 
-    _print_up_header(last_cmd)
+        if results:
+            best_entry, _best_score = results[0]
+            cmd = _print_up_kb_hit(best_entry)
+            _run_command_up(cmd)
+            if len(results) > 1:
+                print(f"\n  {C.DIM}Other matches:{C.RESET}")
+                for entry, sc in results[1:3]:
+                    print(f"  {C.DIM}  • ({sc}%) {entry.get('error', '')[:60]}{C.RESET}")
+            return
 
-    if merged:
-        print(f"  {C.DIM}Merged {merged} OneDrive conflict entries.{C.RESET}")
+        ai_config = get_active_ai_config()
+        if not ai_config:
+            print(f"\n  {C.RED}No AI provider configured. Run: nova setup{C.RESET}")
+            print(f"  {C.DIM}Tip: run  nova add  to save a fix for your team.{C.RESET}")
+            return
 
-    if results:
-        best_entry, _best_score = results[0]
-        cmd = _print_up_kb_hit(best_entry)
-        _run_command_up(cmd)
-        if len(results) > 1:
-            print(f"\n  {C.DIM}Other matches:{C.RESET}")
-            for entry, sc in results[1:3]:
-                print(f"  {C.DIM}  • ({sc}%) {entry.get('error', '')[:60]}{C.RESET}")
-        _print_done_footer(t0)
-        return
-
-    ai_config = get_active_ai_config()
-    if ai_config:
         _print_up_ai_intro()
         ai_result = call_ai_stream(_truncate_for_ai(raw), ai_config)
         streamed = ai_result is not None
@@ -973,12 +893,11 @@ def cmd_up(config):
                     print(f"  {C.GREEN}✅ Saved to KB.{C.RESET}")
                 else:
                     print(f"  {C.YELLOW}⚠  {res}{C.RESET}")
-            _print_done_footer(t0)
             return
         print(f"  {C.YELLOW}⚠  AI couldn't provide a solution.{C.RESET}")
-
-    print(f"  {C.DIM}Tip: run  nova add  to save a fix for your team.{C.RESET}")
-    _print_done_footer(t0)
+        print(f"  {C.DIM}Tip: run  nova add  to save a fix for your team.{C.RESET}")
+    finally:
+        _print_done_footer(t0)
 
 
 # ── nova add ─────────────────────────────────────────────────────────────────
