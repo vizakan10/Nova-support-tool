@@ -219,26 +219,42 @@ def _nova_session_dir():
     return os.path.join(os.path.expanduser("~/.nova/session"), f"nova_{ppid}")
 
 
+_LIKELY_PASSWORD_CMD = re.compile(r"^[A-Za-z0-9@#$!_%^&*]{6,30}$")
+
+
+def _cmd_looks_like_password(cmd):
+    """True if cmd looks like an accidental bare password entry (no spaces)."""
+    if not cmd or " " in cmd:
+        return False
+    return bool(_LIKELY_PASSWORD_CMD.match(cmd))
+
+
+def _clear_session_sensitive(session_dir):
+    """Clear captured command/exit files after a suspected password entry."""
+    for name in ("last_cmd", "last_exit"):
+        path = os.path.join(session_dir, name)
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("")
+        except OSError:
+            pass
+
+
 def get_terminal_output():
     """
-    Capture text for KB / AI.
+    Capture text for KB / AI from Nova shell hooks.
 
-    **Interactive (usual case):** read the last command's output from Nova shell
-    hooks (~/.nova/nova_hooks.sh). If hooks are not installed, fall back to paste.
-
-    **Piped stdin (optional):** advanced use when you want to forward one command's
-    output explicitly.
+    **Piped stdin (optional):** forward one command's output explicitly.
     """
     if not sys.stdin.isatty():
         data = sys.stdin.read()
         if data.strip():
             return data.strip()
 
-    output = _try_hook_capture()
-    if output:
-        return output[0]
-
-    return _prompt_paste()
+    captured = _try_hook_capture()
+    if captured:
+        return captured[0]
+    return None
 
 
 def _read_session_file(session_dir, name):
@@ -281,32 +297,42 @@ def _try_hook_capture(quiet=False):
     session_dir = _nova_session_dir()
 
     if not os.path.isdir(session_dir):
-        if not quiet:
-            print(
-                f"  {C.YELLOW}⚠  Nova shell hooks are not active in this terminal.{C.RESET}"
-            )
-            print(
-                f"  {C.DIM}   Run:  nova install-hooks  then open a new terminal.{C.RESET}"
-            )
+        print(
+            f"  {C.YELLOW}⚠  Nova shell hooks are not active in this terminal.{C.RESET}"
+        )
+        print(
+            f"  {C.DIM}   Run:  nova install-hooks  then open a new terminal.{C.RESET}"
+        )
         return None
 
     last_cmd = _read_session_file(session_dir, "last_cmd").strip()
     if not last_cmd:
-        if not quiet:
-            print(f"  {C.YELLOW}⚠  No captured command found.{C.RESET}")
-            print(
-                f"  {C.DIM}   Run:  nova install-hooks  then open a new terminal.{C.RESET}"
-            )
+        print(f"  {C.YELLOW}⚠  No captured command found.{C.RESET}")
+        print(
+            f"  {C.DIM}   Run:  nova install-hooks  then open a new terminal.{C.RESET}"
+        )
+        return None
+
+    if _cmd_looks_like_password(last_cmd):
+        _clear_session_sensitive(session_dir)
+        print(
+            f"  {C.YELLOW}Last command looks like a password and was cleared for safety. "
+            f"Please re-run your failing command.{C.RESET}"
+        )
         return None
 
     last_output = _read_last_output(session_dir).strip()
+    if not last_output:
+        print(
+            f"  {C.YELLOW}Output not captured yet. Make sure you opened a new terminal "
+            f"after running nova install-hooks, then try again.{C.RESET}"
+        )
+        return None
+
     if not quiet:
         print(f"  {C.DIM}Scanning:{C.RESET} {C.CYAN}{last_cmd}{C.RESET}")
 
-    parts = [f"$ {last_cmd}"]
-    if last_output:
-        parts.append(last_output)
-    return "\n".join(parts), last_cmd
+    return "\n".join([f"$ {last_cmd}", last_output]), last_cmd
 
 
 def _history_line_is_capture_noise(stripped):
@@ -905,15 +931,8 @@ def cmd_up(config):
             results = fuzzy_search(error_sig, kb_data, threshold=70)
 
     if not raw:
-        raw = _prompt_paste()
-        if not raw:
-            print(f"  {C.YELLOW}⚠  No input received. Nothing to search.{C.RESET}")
-            _print_done_footer(t0)
-            return
-        last_cmd = last_cmd or "pasted error"
-        error_sig = detect_error(raw) or raw.strip()[:250]
-        kb_data = load_kb(kb_path)
-        results = fuzzy_search(error_sig, kb_data, threshold=70)
+        _print_done_footer(t0)
+        return
 
     _print_up_header(last_cmd)
 
