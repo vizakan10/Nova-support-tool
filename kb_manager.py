@@ -221,6 +221,28 @@ def _dedup_key(entry):
 #  FUZZY SEARCH
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_MODULE_NOT_FOUND_RE = re.compile(
+    r"(?i)(?:modulenotfounderror:\s*)?no module named\s+['\"]([^'\"]+)['\"]"
+)
+
+
+def _extract_missing_module(text):
+    """Return normalized module name from a ModuleNotFoundError line, or None."""
+    if not text:
+        return None
+    match = _MODULE_NOT_FOUND_RE.search(text)
+    return match.group(1).strip().lower() if match else None
+
+
+def _missing_module_score(name_a, name_b):
+    """Similarity 0–100 between two module names."""
+    if not name_a or not name_b:
+        return 0.0
+    if name_a == name_b:
+        return 100.0
+    return SequenceMatcher(None, name_a, name_b).ratio() * 100
+
+
 def fuzzy_search(query, kb_data, threshold=70):
     """
     Search *kb_data* for entries whose 'error' field matches *query*.
@@ -229,11 +251,16 @@ def fuzzy_search(query, kb_data, threshold=70):
 
     Returns a list of ``(entry, score)`` tuples sorted by score desc.
     Only results ≥ *threshold* (0–100) are included.
+
+    For ``ModuleNotFoundError``, the missing module name must also match
+    closely — matching on error type alone is not enough.
     """
     if not kb_data or not query:
         return []
 
+    threshold = max(0, min(100, float(threshold)))
     query_lower = query.strip().lower()
+    query_module = _extract_missing_module(query_lower)
     results = []
 
     for entry in kb_data:
@@ -241,16 +268,29 @@ def fuzzy_search(query, kb_data, threshold=70):
         if not kb_error:
             continue
 
-        # 1. SequenceMatcher ratio (0.0 – 1.0 → scaled to 0–100)
+        kb_module = _extract_missing_module(kb_error)
+
+        # ModuleNotFoundError: module names must agree, not just the error type.
+        module_score = None
+        if query_module and kb_module:
+            module_score = _missing_module_score(query_module, kb_module)
+            if module_score < threshold:
+                continue
+        elif query_module or kb_module:
+            # One side names a module, the other does not — avoid type-only matches.
+            continue
+
+        # SequenceMatcher ratio (0.0 – 1.0 → scaled to 0–100)
         score = SequenceMatcher(None, query_lower, kb_error).ratio() * 100
 
-        # 2. Substring bonus — if one is fully contained in the other
-        if kb_error in query_lower or query_lower in kb_error:
-            score = max(score, 92.0)
+        # Substring bonus when one error text is fully contained in the other
+        if len(kb_error) >= 20 and (
+            kb_error in query_lower or query_lower in kb_error
+        ):
+            score = max(score, min(92.0, threshold + 10))
 
-        # 3. "Starts-with" bonus — common prefix match
-        if query_lower.startswith(kb_error[:30]) or kb_error.startswith(query_lower[:30]):
-            score = max(score, 85.0)
+        if module_score is not None:
+            score = min(score, module_score)
 
         if score >= threshold:
             results.append((entry, round(score, 1)))
