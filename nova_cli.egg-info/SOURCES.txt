@@ -1,0 +1,14 @@
+LICENSE
+MANIFEST.in
+README.md
+config.py
+kb_manager.py
+nova_cli.py
+nova_hooks.sh
+setup.py
+nova_cli.egg-info/PKG-INFO
+nova_cli.egg-info/SOURCES.txt
+nova_cli.egg-info/dependency_links.txt
+nova_cli.egg-info/entry_points.txt
+nova_cli.egg-info/requires.txt
+nova_cli.egg-info/top_level.txt

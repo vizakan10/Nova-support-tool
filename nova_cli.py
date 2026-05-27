@@ -8,6 +8,9 @@ import os
 import re
 import sys
 import json
+import time
+import shutil
+import threading
 import subprocess
 import urllib.request
 import urllib.error
@@ -170,6 +173,18 @@ def _history_line_likely_emit_stderr(stripped):
     """Commands that often produce useful failure output when re-run."""
     s = re.sub(r"^sudo\s+", "", stripped.strip(), flags=re.I).strip()
     low = s.lower()
+
+    # Typos without a space after the binary (``java--version``, ``java--uision``)
+    # must still count as that tool — otherwise ``git pull`` wins in history order.
+    if re.match(r"^java(?:[\s\-]|$)", s, re.I):
+        return True
+    if re.match(r"^javac(?:[\s\-]|$)", s, re.I):
+        return True
+    if re.match(r"^python\d*(?:[\s\-]|$)", s, re.I):
+        return True
+    if re.match(r"^node(?:[\s\-]|$)", s, re.I):
+        return True
+
     if low.startswith("./") and not low.startswith("./install.sh"):
         exe = s[2:].split()[0] if len(s) > 2 else ""
         if exe and os.path.isfile(os.path.join(os.getcwd(), exe)):
@@ -191,24 +206,107 @@ def _history_line_is_install_script_noise(stripped):
 #  TERMINAL OUTPUT CAPTURE
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _nova_session_dir():
+    """Hook session directory for the parent shell (matches nova_hooks.sh $$)."""
+    env_dir = os.environ.get("NOVA_SESSION_DIR", "").strip()
+    if env_dir:
+        return env_dir
+
+    ppid = os.getppid()
+    if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK):
+        return f"/dev/shm/nova_{ppid}"
+
+    return os.path.join(os.path.expanduser("~/.nova/session"), f"nova_{ppid}")
+
+
 def get_terminal_output():
     """
-    Capture the last terminal output.
+    Capture text for KB / AI.
 
-    1. Piped stdin  (echo err | nova up) — most reliable
-    2. Bash history re-run (only lines that look like errors or failing tools — else paste)
-    3. Manual paste fallback
+    **Interactive (usual case):** read the last command's output from Nova shell
+    hooks (~/.nova/nova_hooks.sh). If hooks are not installed, fall back to paste.
+
+    **Piped stdin (optional):** advanced use when you want to forward one command's
+    output explicitly.
     """
     if not sys.stdin.isatty():
-        data = sys.stdin.read().strip()
-        if data:
-            return data
+        data = sys.stdin.read()
+        if data.strip():
+            return data.strip()
 
-    output = _try_bash_history()
+    output = _try_hook_capture()
     if output:
-        return output
+        return output[0]
 
     return _prompt_paste()
+
+
+def _read_session_file(session_dir, name):
+    path = os.path.join(session_dir, name)
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
+
+
+def _read_last_output(session_dir, max_wait=0.4, interval=0.05):
+    """Read last_output; brief retry while tee/process substitution flushes."""
+    path = os.path.join(session_dir, "last_output")
+    deadline = time.monotonic() + max_wait
+    prev_size = None
+    content = ""
+
+    while True:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+            size = os.path.getsize(path)
+            if prev_size is not None and size == prev_size:
+                return content
+            prev_size = size
+        except OSError:
+            content = ""
+
+        if time.monotonic() >= deadline:
+            return content
+        time.sleep(interval)
+
+
+def _try_hook_capture(quiet=False):
+    """Read last command and output captured by nova_hooks.sh (no command re-run).
+
+    Returns (combined_text, last_cmd) or None on failure.
+    """
+    session_dir = _nova_session_dir()
+
+    if not os.path.isdir(session_dir):
+        if not quiet:
+            print(
+                f"  {C.YELLOW}⚠  Nova shell hooks are not active in this terminal.{C.RESET}"
+            )
+            print(
+                f"  {C.DIM}   Run:  nova install-hooks  then open a new terminal.{C.RESET}"
+            )
+        return None
+
+    last_cmd = _read_session_file(session_dir, "last_cmd").strip()
+    if not last_cmd:
+        if not quiet:
+            print(f"  {C.YELLOW}⚠  No captured command found.{C.RESET}")
+            print(
+                f"  {C.DIM}   Run:  nova install-hooks  then open a new terminal.{C.RESET}"
+            )
+        return None
+
+    last_output = _read_last_output(session_dir).strip()
+    if not quiet:
+        print(f"  {C.DIM}Scanning:{C.RESET} {C.CYAN}{last_cmd}{C.RESET}")
+
+    parts = [f"$ {last_cmd}"]
+    if last_output:
+        parts.append(last_output)
+    return "\n".join(parts), last_cmd
 
 
 def _history_line_is_capture_noise(stripped):
@@ -226,82 +324,10 @@ def _history_line_is_capture_noise(stripped):
     return False
 
 
-def _try_bash_history():
-    histfile = os.environ.get("HISTFILE", os.path.expanduser("~/.bash_history"))
-
-    if not os.path.isfile(histfile):
-        return None
-
-    try:
-        with open(histfile, "r", encoding="utf-8", errors="replace") as fh:
-            lines = fh.readlines()
-    except OSError:
-        return None
-
-    # Newest first: shell noise, nova, and misleading ./install.sh (wrong cwd) removed.
-    candidates = []
-    for line in reversed(lines):
-        stripped = line.strip()
-        if _history_line_is_capture_noise(stripped):
-            continue
-        if _history_line_is_install_script_noise(stripped):
-            continue
-        candidates.append(stripped)
-        if len(candidates) >= 40:
-            break
-
-    # One pass, newest first: first line matching *any* rule wins. (Previously we
-    # scanned all history for error-shaped text first, so an old ``echo 'ERROR …'``
-    # beat a fresh ``java …`` command from the same session.)
-    last_cmd = None
-    for stripped in candidates:
-        low = stripped.lower()
-        if _history_line_likely_emit_stderr(stripped) or _history_line_matches_error_hint(
-            stripped
-        ) or (low.startswith("echo ") and len(stripped) >= 20):
-            last_cmd = stripped
-            break
-
-    if not last_cmd:
-        print(
-            f"  {C.DIM}No recent history line looked like an error or a failing tool command.{C.RESET}"
-        )
-        print(
-            f"  {C.DIM}Paste the terminal output below, or pipe:  "
-            f"yourcommand 2>&1 | nova up{C.RESET}"
-        )
-        return None
-
-    print(f"  {C.DIM}Re-run candidate:{C.RESET} {C.CYAN}{last_cmd}{C.RESET}")
-
-    try:
-        ans = input(f"  {C.YELLOW}Re-run to capture output for KB/AI? [Y/n]: {C.RESET}").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return None
-
-    if ans not in ("", "y", "yes"):
-        return None
-
-    try:
-        result = subprocess.run(
-            last_cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            executable="/bin/bash",
-        )
-        combined = (result.stdout or "") + "\n" + (result.stderr or "")
-        return combined.strip() or None
-    except subprocess.TimeoutExpired:
-        print(f"  {C.YELLOW}⚠  Command timed out after 30 s.{C.RESET}")
-    except Exception:
-        pass
-    return None
-
-
 def _prompt_paste():
-    print(f"  {C.YELLOW}📋 Paste the error output below (Ctrl+D when done):{C.RESET}")
+    print(
+        f"  {C.YELLOW}📋 Paste what the terminal showed (select text, paste, Ctrl+D when done):{C.RESET}"
+    )
     print(f"  {C.DIM}{'─' * 44}{C.RESET}")
 
     buf = []
@@ -314,6 +340,16 @@ def _prompt_paste():
         return None
 
     return "\n".join(buf).strip() or None
+
+
+_TRUNCATE_MARKER = "... [truncated] ..."
+
+
+def _truncate_for_ai(text, limit=3000, head=500, tail=2500):
+    """Shrink large output before sending to AI (keeps head + tail)."""
+    if not text or len(text) <= limit:
+        return text
+    return text[:head] + _TRUNCATE_MARKER + text[-tail:]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -365,6 +401,24 @@ Command: <exact CLI command to fix it>
 """
 
 
+_AI_SECRET_PATTERNS = [
+    (re.compile(r"(?i)(token=)([^\s'\"]+)"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(password=)([^\s'\"]+)"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(api_key=)([^\s'\"]+)"), r"\1[REDACTED]"),
+    (re.compile(r"(?i)(Bearer\s+)([^\s'\"]+)"), r"\1[REDACTED]"),
+    (re.compile(r"ghp_[A-Za-z0-9]+"), "[REDACTED]"),
+    (re.compile(r"sk-[A-Za-z0-9]+"), "[REDACTED]"),
+]
+
+
+def _redact_for_ai(text):
+    """Sanitize and redact sensitive patterns before sending error text to AI."""
+    text = sanitize(text)
+    for pattern, repl in _AI_SECRET_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
+
+
 def call_ai(error_text, ai_config):
     """
     Call the AI using the provided ai_config dict.
@@ -378,7 +432,7 @@ def call_ai(error_text, ai_config):
     if not all([provider, api_key, model, endpoint]):
         return None
 
-    prompt = _AI_PROMPT.format(error=sanitize(error_text))
+    prompt = _AI_PROMPT.format(error=_redact_for_ai(error_text))
 
     if provider == "claude":
         body = {
@@ -444,6 +498,125 @@ def call_ai(error_text, ai_config):
     }
 
 
+def _parse_ai_response(ai_text):
+    """Parse Solution:/Command: lines from AI text."""
+    solution, command = "", ""
+    for line in ai_text.splitlines():
+        low = line.strip().lower()
+        if low.startswith("solution:"):
+            solution = line.split(":", 1)[1].strip()
+        elif low.startswith("command:"):
+            command = line.split(":", 1)[1].strip().strip("`").strip()
+    return {
+        "solution": solution or ai_text.strip(),
+        "command": command,
+    }
+
+
+def _extract_stream_delta(chunk, provider):
+    if provider == "claude":
+        if chunk.get("type") == "content_block_delta":
+            return chunk.get("delta", {}).get("text", "")
+        return ""
+    choices = chunk.get("choices") or []
+    if choices:
+        return choices[0].get("delta", {}).get("content", "") or ""
+    return ""
+
+
+def _stream_print_words(piece):
+    """Print streamed text word-by-word for a live CLI feel."""
+    if not piece:
+        return
+    tokens = re.split(r"(\s+)", piece)
+    for tok in tokens:
+        if not tok:
+            continue
+        sys.stdout.write(tok)
+        if tok.strip():
+            sys.stdout.flush()
+
+
+def call_ai_stream(error_text, ai_config):
+    """Call AI with streaming; print response word-by-word. Returns parsed result dict."""
+    provider = ai_config.get("provider", "")
+    api_key = ai_config.get("api_key", "")
+    model = ai_config.get("model", "")
+    endpoint = ai_config.get("endpoint", "")
+
+    if not all([provider, api_key, model, endpoint]):
+        return None
+
+    prompt = _AI_PROMPT.format(error=_redact_for_ai(error_text))
+
+    if provider == "claude":
+        body = {
+            "model": model,
+            "max_tokens": 300,
+            "stream": True,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+    else:
+        body = {
+            "model": model,
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": "You are a concise DevOps assistant."},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 300,
+            "temperature": 0.2,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Authorization": f"Bearer {api_key}",
+        }
+
+    headers["User-Agent"] = NOVA_HTTP_USER_AGENT
+    payload = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(endpoint, data=payload, headers=headers)
+
+    full_parts = []
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or line.startswith("event:"):
+                    continue
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                piece = _extract_stream_delta(chunk, provider)
+                if not piece:
+                    continue
+                full_parts.append(piece)
+                _stream_print_words(piece)
+        print()
+    except urllib.error.HTTPError as exc:
+        print()
+        msg = exc.read().decode("utf-8", errors="replace")[:200]
+        print(f"  {C.RED}⚠  AI API error ({exc.code}): {msg}{C.RESET}")
+        return None
+    except Exception as exc:
+        print()
+        print(f"  {C.RED}⚠  AI request failed: {exc}{C.RESET}")
+        return None
+
+    return _parse_ai_response("".join(full_parts))
+
+
 _AI_ASK_PROMPT = """\
 You are a concise technical assistant. Answer the following in a clear, short way.
 
@@ -494,6 +667,109 @@ def call_ai_ask(query, ai_config):
 # ═══════════════════════════════════════════════════════════════════════════════
 #  DISPLAY HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
+
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+class _Spinner:
+    """Lightweight terminal spinner (background thread)."""
+
+    def __init__(self, message="Scanning..."):
+        self.message = message
+        self._stop = threading.Event()
+        self._thread = None
+
+    def __enter__(self):
+        if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+            self._thread = threading.Thread(target=self._spin, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=0.5)
+        if hasattr(sys.stdout, "isatty") and sys.stdout.isatty():
+            sys.stdout.write("\r" + " " * (len(self.message) + 6) + "\r")
+            sys.stdout.flush()
+        return False
+
+    def _spin(self):
+        i = 0
+        while not self._stop.is_set():
+            frame = _SPINNER_FRAMES[i % len(_SPINNER_FRAMES)]
+            sys.stdout.write(f"\r  {C.CYAN}{frame}{C.RESET}  {self.message}")
+            sys.stdout.flush()
+            i += 1
+            self._stop.wait(0.08)
+
+
+def _print_up_header(last_cmd):
+    print()
+    print(f"  {C.RED}✗{C.RESET}  {C.WHITE}{C.BOLD}{last_cmd}{C.RESET}")
+
+
+def _print_up_kb_hit(entry):
+    solution = entry.get("solution", "")
+    command = entry.get("command", "")
+    print()
+    print(f"  {C.GREEN}⚡ Found in knowledge base{C.RESET}")
+    print()
+    print(f"  {C.BOLD}Solution:{C.RESET} {solution}")
+    if command:
+        print(f"  {C.BOLD}Command:{C.RESET}  {C.CYAN}{command}{C.RESET}")
+    return command
+
+
+def _print_up_ai_intro():
+    print()
+    print(f"  {C.CYAN}⟳ Asking AI...{C.RESET}")
+    print(f"  {C.DIM}{'─' * 44}{C.RESET}")
+    sys.stdout.write("  ")
+    sys.stdout.flush()
+
+
+def _print_up_fix_lines(solution, command):
+    print()
+    print(f"  {C.BOLD}Solution:{C.RESET} {solution}")
+    if command:
+        print(f"  {C.BOLD}Command:{C.RESET}  {C.CYAN}{command}{C.RESET}")
+
+
+def _print_done_footer(start_time):
+    elapsed = time.monotonic() - start_time
+    plain = f"Done in {elapsed:.1f}s"
+    try:
+        width = shutil.get_terminal_size((80, 20)).columns
+    except OSError:
+        width = 80
+    pad = max(0, width - len(plain))
+    print(f"{' ' * pad}{C.DIM}{plain}{C.RESET}")
+
+
+def _run_command_up(command):
+    if not command:
+        return False
+    try:
+        ans = input(f"  {C.YELLOW}Run fix? [y/N]: {C.RESET}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if ans not in ("y", "yes"):
+        return False
+    print(f"  {C.DIM}$ {command}{C.RESET}")
+    try:
+        rc = subprocess.call(command, shell=True, executable="/bin/bash", timeout=120)
+        if rc == 0:
+            print(f"  {C.GREEN}✅ Command succeeded.{C.RESET}")
+            return True
+        print(f"  {C.RED}❌ Exited with code {rc}.{C.RESET}")
+    except subprocess.TimeoutExpired:
+        print(f"  {C.YELLOW}⚠  Command timed out.{C.RESET}")
+    except Exception as exc:
+        print(f"  {C.RED}❌ {exc}{C.RESET}")
+    return False
+
 
 def _box(lines, colour=C.BLUE):
     width = max((len(l) for l in lines), default=40) + 4
@@ -600,80 +876,73 @@ def _run_command(command):
 
 def cmd_up(config):
     """nova up — Error Intercept Protocol."""
+    t0 = time.monotonic()
+
+    if not get_active_ai_config():
+        print(f"\n  {C.RED}No AI provider configured. Run: nova setup{C.RESET}\n")
+        return
+
     kb_path = get_active_kb_path()
     if not kb_path or not os.path.isdir(kb_path):
         print(f"  {C.RED}❌ Active KB not found or not configured.{C.RESET}")
         print(f"  {C.DIM}   Run:  nova setup  or  nova use-kb <nickname>{C.RESET}")
         return
 
-    print(f"\n  {C.BLUE}{C.BOLD}🔍 Nova — Error Intercept{C.RESET}")
-    
-    # Show active KB
-    kbs = list_all_kbs()
-    active_kb = next((i for i in kbs if i[2]), None)
-    if active_kb:
-        print(f"  {C.DIM}KB: {active_kb[0]} ({active_kb[1]}){C.RESET}")
-    print(
-        f"  {C.DIM}Flow: capture error text → search KB → AI only if no good match.{C.RESET}\n"
-    )
+    raw = None
+    last_cmd = ""
+    error_sig = ""
+    results = []
+    merged = 0
 
-    # 1. Conflict merge
-    merged = resolve_conflicts(kb_path)
-    if merged:
-        print(f"  {C.GREEN}🔄 Merged {merged} entries from OneDrive conflict files.{C.RESET}\n")
+    with _Spinner("Scanning..."):
+        merged = resolve_conflicts(kb_path)
+        captured = _try_hook_capture(quiet=True)
+        if captured:
+            raw, last_cmd = captured
+        if raw:
+            error_sig = detect_error(raw) or raw.strip()[:250]
+            kb_data = load_kb(kb_path)
+            results = fuzzy_search(error_sig, kb_data, threshold=70)
 
-    # 2. Capture output
-    raw = get_terminal_output()
     if not raw:
-        print(f"  {C.YELLOW}⚠  No input received. Nothing to search.{C.RESET}")
-        return
+        raw = _prompt_paste()
+        if not raw:
+            print(f"  {C.YELLOW}⚠  No input received. Nothing to search.{C.RESET}")
+            _print_done_footer(t0)
+            return
+        last_cmd = last_cmd or "pasted error"
+        error_sig = detect_error(raw) or raw.strip()[:250]
+        kb_data = load_kb(kb_path)
+        results = fuzzy_search(error_sig, kb_data, threshold=70)
 
-    # 3. Detect error
-    error_sig = detect_error(raw)
-    if error_sig:
-        print(f"  {C.GREEN}✅ Error detected:{C.RESET} {error_sig}")
-    else:
-        error_sig = raw.strip()[:250]
-        print(f"  {C.YELLOW}⚠  No specific error pattern found — searching with full text.{C.RESET}")
+    _print_up_header(last_cmd)
 
-    # 4. KB search
-    print(f"\n  {C.BLUE}📚 Searching Knowledge Base...{C.RESET}")
-    kb_data = load_kb(kb_path)
-    print(f"  {C.DIM}   {len(kb_data)} entries loaded.{C.RESET}")
-
-    results = fuzzy_search(error_sig, kb_data, threshold=70)
+    if merged:
+        print(f"  {C.DIM}Merged {merged} OneDrive conflict entries.{C.RESET}")
 
     if results:
-        best_entry, best_score = results[0]
-        cmd = display_solution(best_entry, score=best_score, source="KB")
-        _run_command(cmd)
-
+        best_entry, _best_score = results[0]
+        cmd = _print_up_kb_hit(best_entry)
+        _run_command_up(cmd)
         if len(results) > 1:
-            print(f"\n  {C.DIM}Other possible matches:{C.RESET}")
-            for entry, sc in results[1:4]:
+            print(f"\n  {C.DIM}Other matches:{C.RESET}")
+            for entry, sc in results[1:3]:
                 print(f"  {C.DIM}  • ({sc}%) {entry.get('error', '')[:60]}{C.RESET}")
+        _print_done_footer(t0)
         return
 
-    print(f"  {C.YELLOW}❌ No match found in KB.{C.RESET}")
-
-    # 5. AI fallback
     ai_config = get_active_ai_config()
     if ai_config:
-        p = ai_config.get("provider", "?")
-        m = ai_config.get("model", "?")
-        print(f"\n  {C.CYAN}🤖 Asking AI ({p}/{m})...{C.RESET}")
-        ai_result = call_ai(raw, ai_config)
-
+        _print_up_ai_intro()
+        ai_result = call_ai_stream(_truncate_for_ai(raw), ai_config)
+        streamed = ai_result is not None
+        if ai_result is None:
+            ai_result = call_ai(_truncate_for_ai(raw), ai_config)
         if ai_result and ai_result.get("solution"):
-            ai_entry = {
-                "error": error_sig,
-                "solution": ai_result["solution"],
-                "command": ai_result.get("command", ""),
-            }
-            cmd = display_solution(ai_entry, source="AI")
-            _run_command(cmd)
-
-            if _ask_yn("💾 Save this fix to the KB for your team?"):
+            if not streamed:
+                _print_up_fix_lines(ai_result["solution"], ai_result.get("command", ""))
+            _run_command_up(ai_result.get("command", ""))
+            if _ask_yn("Save fix to KB?", default_yes=False):
                 ok, res = add_entry(
                     kb_path,
                     error_sig,
@@ -682,16 +951,15 @@ def cmd_up(config):
                     config.get("added_by", "unknown"),
                 )
                 if ok:
-                    print(f"  {C.GREEN}✅ Saved to KB! OneDrive will sync.{C.RESET}")
+                    print(f"  {C.GREEN}✅ Saved to KB.{C.RESET}")
                 else:
                     print(f"  {C.YELLOW}⚠  {res}{C.RESET}")
+            _print_done_footer(t0)
             return
-        else:
-            print(f"  {C.YELLOW}⚠  AI couldn't provide a solution.{C.RESET}")
+        print(f"  {C.YELLOW}⚠  AI couldn't provide a solution.{C.RESET}")
 
-    print(f"\n  {C.DIM}💡 Tip:  Once you fix this, run  nova add  to save the solution.{C.RESET}")
-    if not ai_config:
-        print(f"  {C.DIM}💡 Run  nova add-llm  to configure an AI provider.{C.RESET}")
+    print(f"  {C.DIM}Tip: run  nova add  to save a fix for your team.{C.RESET}")
+    _print_done_footer(t0)
 
 
 # ── nova add ─────────────────────────────────────────────────────────────────
@@ -938,6 +1206,106 @@ def cmd_secrets_path():
     print(f"\n  {C.BOLD}Secrets file:{C.RESET} {path}")
     print(f"  {C.DIM}Exists: {'yes' if exists else 'no'}{C.RESET}")
     print()
+
+
+def _find_nova_hooks_source():
+    """Locate nova_hooks.sh from repo, editable install, or pip data_files."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "nova_hooks.sh"),
+        os.path.join(sys.prefix, "share", "nova-cli", "nova_hooks.sh"),
+        os.path.join(os.path.expanduser("~/.local"), "share", "nova-cli", "nova_hooks.sh"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def cmd_install_hooks():
+    """nova install-hooks — Install shell hooks for output capture."""
+    import shutil
+
+    source = _find_nova_hooks_source()
+    if not source:
+        print(f"  {C.RED}❌ nova_hooks.sh not found in the installation.{C.RESET}")
+        print(f"  {C.DIM}   Reinstall Nova from the repo, then try again.{C.RESET}")
+        return
+
+    dest_dir = os.path.dirname(CONFIG_FILE)
+    dest = os.path.join(dest_dir, "nova_hooks.sh")
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copy2(source, dest)
+        with open(dest, "r", encoding="utf-8", errors="replace") as fh:
+            content = fh.read()
+        with open(dest, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(content.replace("\r", ""))
+    except OSError as exc:
+        print(f"  {C.RED}❌ Could not install hooks: {exc}{C.RESET}")
+        return
+
+    bashrc = os.path.expanduser("~/.bashrc")
+    hook_line = "source ~/.nova/nova_hooks.sh"
+    already = False
+    if os.path.isfile(bashrc):
+        try:
+            with open(bashrc, "r", encoding="utf-8", errors="replace") as fh:
+                already = hook_line in fh.read()
+        except OSError:
+            pass
+
+    if not already:
+        try:
+            with open(bashrc, "a", encoding="utf-8") as fh:
+                fh.write("\n# Nova CLI shell hooks\n")
+                fh.write(f"{hook_line}\n")
+        except OSError as exc:
+            print(f"  {C.RED}❌ Could not update ~/.bashrc: {exc}{C.RESET}")
+            print(f"  {C.DIM}   Add manually:  {hook_line}{C.RESET}")
+            return
+
+    print(f"\n  {C.GREEN}Hooks installed. Open a new terminal and you're good to go.{C.RESET}\n")
+
+
+def cmd_debug_session():
+    """nova debug-session — Print hook capture state (testing only)."""
+    session_dir = _nova_session_dir()
+    exists = os.path.isdir(session_dir)
+    env_dir = os.environ.get("NOVA_SESSION_DIR", "").strip()
+
+    print(f"\n  {C.ORANGE}{C.BOLD}🔬 Nova — debug-session (testing only){C.RESET}\n")
+    print(f"  {C.BOLD}Parent PID:{C.RESET} {os.getppid()}")
+    print(f"  {C.BOLD}Session dir:{C.RESET} {session_dir}")
+    if env_dir:
+        print(f"  {C.BOLD}NOVA_SESSION_DIR:{C.RESET} {env_dir}")
+    print(f"  {C.BOLD}Exists:{C.RESET} {'yes' if exists else 'no'}")
+
+    capture_log = os.path.join(session_dir, "capture.log")
+    if exists and os.path.isfile(capture_log):
+        try:
+            print(f"  {C.BOLD}capture.log:{C.RESET} {os.path.getsize(capture_log)} bytes")
+        except OSError:
+            pass
+    print()
+
+    for name in ("last_cmd", "last_output"):
+        path = os.path.join(session_dir, name)
+        print(f"  {C.BOLD}{name}:{C.RESET}")
+        if not exists or not os.path.isfile(path):
+            print(f"  {C.DIM}(missing){C.RESET}\n")
+            continue
+        try:
+            content = _read_session_file(session_dir, name)
+            if content:
+                print(content, end="" if content.endswith("\n") else "\n")
+            else:
+                print(f"  {C.DIM}(empty){C.RESET}\n")
+                continue
+        except OSError as exc:
+            print(f"  {C.RED}read error: {exc}{C.RESET}\n")
+            continue
+        print()
 
 
 # ── nova fix ─────────────────────────────────────────────────────────────────
@@ -1575,6 +1943,14 @@ def main():
         cmd_setup()
         return
 
+    if command == "install-hooks":
+        cmd_install_hooks()
+        return
+
+    if command == "debug-session":
+        cmd_debug_session()
+        return
+
     if command == "add-llm":
         cmd_add_llm()
         return
@@ -1695,13 +2071,15 @@ def main():
 
     # ── Commands that need config ────────────────────────────────────────
 
+    if command == "up":
+        cmd_up(load_config() or {})
+        return
+
     config = get_config()
     if not config:
         return
 
-    if command == "up":
-        cmd_up(config)
-    elif command == "add":
+    if command == "add":
         cmd_add(config)
     elif command == "fix":
         cmd_fix(config)
