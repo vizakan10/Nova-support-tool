@@ -144,6 +144,52 @@ def _nova_session_dir():
     return os.path.join(os.path.expanduser("~/.nova/session"), f"nova_{ppid}")
 
 
+_HOOKS_FILE = os.path.expanduser("~/.nova/nova_hooks.sh")
+_HOOKS_SOURCE_LINE = "source ~/.nova/nova_hooks.sh"
+
+
+def _hooks_source_line_in_bashrc():
+    bashrc = os.path.expanduser("~/.bashrc")
+    try:
+        with open(bashrc, "r", encoding="utf-8", errors="replace") as fh:
+            return _HOOKS_SOURCE_LINE in fh.read()
+    except OSError:
+        return False
+
+
+def _hooks_installed():
+    return os.path.isfile(_HOOKS_FILE)
+
+
+def _print_hooks_inactive_help():
+    """Explain why capture failed and how to activate hooks in this terminal."""
+    if _hooks_installed() and _hooks_source_line_in_bashrc():
+        print(
+            f"  {C.YELLOW}⚠  Hooks are installed but not loaded in this terminal.{C.RESET}"
+        )
+        print(
+            f"  {C.DIM}   Run:  source ~/.bashrc{C.RESET}"
+        )
+        print(
+            f"  {C.DIM}   Or:   source ~/.nova/nova_hooks.sh{C.RESET}"
+        )
+        print(
+            f"  {C.DIM}   Then re-run your failing command and try  nova up  again.{C.RESET}"
+        )
+    elif _hooks_installed():
+        print(
+            f"  {C.YELLOW}⚠  Hooks file exists but ~/.bashrc does not source it.{C.RESET}"
+        )
+        print(f"  {C.DIM}   Run:  nova install-hooks{C.RESET}")
+    else:
+        print(
+            f"  {C.YELLOW}⚠  Nova shell hooks are not installed.{C.RESET}"
+        )
+        print(
+            f"  {C.DIM}   Run:  nova install-hooks  then  source ~/.bashrc{C.RESET}"
+        )
+
+
 _PASSWORD_CMD_BLOCKLIST = frozenset({
     "docker", "python", "python3", "node", "npm", "git", "make", "gradle",
     "kubectl", "bash", "sh", "sudo", "apt", "pip", "curl", "wget", "ls", "cd",
@@ -189,8 +235,8 @@ def get_terminal_output():
             return data.strip()
 
     captured = _try_hook_capture()
-    if captured:
-        return captured[0]
+    if captured[0]:
+        return captured[0][0]
     return None
 
 
@@ -232,55 +278,56 @@ _OUTPUT_NOT_CAPTURED = (
 )
 
 
-def _try_hook_capture(quiet=False):
+def _try_hook_capture(quiet=False, silent=False):
     """Read last command and output captured by nova_hooks.sh (no command re-run).
 
-    Returns (combined_text, last_cmd) or None on failure.
-    If output is missing but the command was captured, still returns the command
-    with a note so AI can attempt a fix (no paste or re-run fallback).
+    Returns ``((combined_text, last_cmd), None)`` on success, or
+    ``(None, reason)`` on failure where *reason* is one of:
+    ``inactive``, ``no_cmd``, ``password``.
+
+    When *silent* is True, do not print diagnostics (for use under a spinner).
     """
     session_dir = _nova_session_dir()
 
     if not os.path.isdir(session_dir):
-        print(
-            f"  {C.YELLOW}⚠  Nova shell hooks are not active in this terminal.{C.RESET}"
-        )
-        print(
-            f"  {C.DIM}   Run:  nova install-hooks  then open a new terminal.{C.RESET}"
-        )
-        return None
+        if not silent:
+            _print_hooks_inactive_help()
+        return None, "inactive"
 
     last_cmd = _read_session_file(session_dir, "last_cmd").strip()
     if not last_cmd:
-        print(f"  {C.YELLOW}⚠  No captured command found.{C.RESET}")
-        print(
-            f"  {C.DIM}   Run:  nova install-hooks  then open a new terminal.{C.RESET}"
-        )
-        return None
+        if not silent:
+            print(f"  {C.YELLOW}⚠  No captured command found.{C.RESET}")
+            print(
+                f"  {C.DIM}   Run a failing command in this terminal, then  nova up{C.RESET}"
+            )
+        return None, "no_cmd"
 
     if _cmd_looks_like_password(last_cmd):
         _clear_session_sensitive(session_dir)
-        print(
-            f"  {C.YELLOW}Last command looks like a password and was cleared for safety. "
-            f"Please re-run your failing command.{C.RESET}"
-        )
-        return None
+        if not silent:
+            print(
+                f"  {C.YELLOW}Last command looks like a password and was cleared for safety. "
+                f"Please re-run your failing command.{C.RESET}"
+            )
+        return None, "password"
 
     last_output = _read_last_output(session_dir).strip()
     if not last_output:
-        print(
-            f"  {C.YELLOW}⚠  Command output was not captured; using command only.{C.RESET}"
-        )
-        print(
-            f"  {C.DIM}   Open a new terminal after nova install-hooks for full capture.{C.RESET}"
-        )
+        if not silent:
+            print(
+                f"  {C.YELLOW}⚠  Command output was not captured; using command only.{C.RESET}"
+            )
+            print(
+                f"  {C.DIM}   Re-run your failing command, then try  nova up  again.{C.RESET}"
+            )
         combined = "\n".join([f"$ {last_cmd}", _OUTPUT_NOT_CAPTURED])
-        return combined, last_cmd
+        return (combined, last_cmd), None
 
-    if not quiet:
+    if not quiet and not silent:
         print(f"  {C.DIM}Scanning:{C.RESET} {C.CYAN}{last_cmd}{C.RESET}")
 
-    return "\n".join([f"$ {last_cmd}", last_output]), last_cmd
+    return ("\n".join([f"$ {last_cmd}", last_output]), last_cmd), None
 
 
 def _prompt_paste():
@@ -848,10 +895,11 @@ def cmd_up(config):
         error_sig = ""
         results = []
         merged = 0
+        capture_reason = None
 
         with _Spinner("Scanning..."):
             merged = resolve_conflicts(kb_path)
-            captured = _try_hook_capture(quiet=True)
+            captured, capture_reason = _try_hook_capture(quiet=True, silent=True)
             if captured:
                 raw, last_cmd = captured
             if raw:
@@ -860,6 +908,18 @@ def cmd_up(config):
                 results = fuzzy_search(error_sig, kb_data, threshold=70)
 
         if not raw:
+            if capture_reason == "inactive":
+                _print_hooks_inactive_help()
+            elif capture_reason == "no_cmd":
+                print(f"  {C.YELLOW}⚠  No captured command found.{C.RESET}")
+                print(
+                    f"  {C.DIM}   Run a failing command in this terminal, then  nova up{C.RESET}"
+                )
+            elif capture_reason == "password":
+                print(
+                    f"  {C.YELLOW}Last command looks like a password and was cleared for safety. "
+                    f"Please re-run your failing command.{C.RESET}"
+                )
             return
 
         _print_up_header(last_cmd)
@@ -964,7 +1024,10 @@ def cmd_add(config):
 
 def cmd_setup():
     """nova setup — (Re)configure Nova."""
-    interactive_setup()
+    cfg = interactive_setup()
+    if cfg is not None and not (_hooks_installed() and _hooks_source_line_in_bashrc()):
+        print(f"\n  {C.DIM}▶ Installing shell hooks...{C.RESET}")
+        cmd_install_hooks()
 
 
 # ── nova add-llm ─────────────────────────────────────────────────────────────
@@ -1214,7 +1277,14 @@ def cmd_install_hooks():
             print(f"  {C.DIM}   Add manually:  {hook_line}{C.RESET}")
             return
 
-    print(f"\n  {C.GREEN}Hooks installed. Open a new terminal and you're good to go.{C.RESET}\n")
+    print(
+        f"\n  {C.GREEN}Hooks installed.{C.RESET} "
+        f"{C.DIM}One-time: open a new terminal (or run{C.RESET} "
+        f"{C.CYAN}source ~/.bashrc{C.RESET}{C.DIM}).{C.RESET}"
+    )
+    print(
+        f"  {C.DIM}After that, hooks load automatically every time you open a terminal.{C.RESET}\n"
+    )
 
 
 def cmd_debug_session():

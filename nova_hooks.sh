@@ -55,4 +55,8 @@ _nova_prompt_command() {
 }
 
 trap '_nova_debug_trap' DEBUG
-PROMPT_COMMAND='_nova_last_exit=$?; _nova_prompt_command'
+if [[ -n "${PROMPT_COMMAND:-}" ]]; then
+    PROMPT_COMMAND='_nova_last_exit=$?; _nova_prompt_command; '"${PROMPT_COMMAND}"
+else
+    PROMPT_COMMAND='_nova_last_exit=$?; _nova_prompt_command'
+fi
