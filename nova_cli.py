@@ -161,33 +161,71 @@ def _hooks_installed():
     return os.path.isfile(_HOOKS_FILE)
 
 
-def _print_hooks_inactive_help():
-    """Explain why capture failed and how to activate hooks in this terminal."""
-    if _hooks_installed() and _hooks_source_line_in_bashrc():
+def _hooks_active_in_parent_shell():
+    """True when the parent bash session has loaded nova_hooks.sh."""
+    return os.path.isdir(_nova_session_dir())
+
+
+def _print_hooks_activation_reminder(*, fresh_install=False, for_nova_up=False):
+    """
+    Tell the user to activate hooks in this terminal (cannot be done from a child process).
+    """
+    print()
+    if fresh_install:
+        print(
+            f"  {C.GREEN}✅ Shell hooks installed and registered in ~/.bashrc.{C.RESET}"
+        )
+    elif _hooks_installed() and _hooks_source_line_in_bashrc():
         print(
             f"  {C.YELLOW}⚠  Hooks are installed but not loaded in this terminal.{C.RESET}"
         )
+    else:
         print(
-            f"  {C.DIM}   Run:  source ~/.bashrc{C.RESET}"
+            f"  {C.YELLOW}⚠  Shell hooks need to be activated in this terminal.{C.RESET}"
         )
+
+    print(f"  {C.BOLD}  Please do one of the following (one-time for this terminal):{C.RESET}")
+    print(
+        f"    {C.CYAN}1.{C.RESET} Run:  {C.CYAN}{C.BOLD}source ~/.bashrc{C.RESET}"
+    )
+    print(
+        f"    {C.CYAN}2.{C.RESET} Or open a {C.BOLD}new terminal{C.RESET} window/tab"
+    )
+    print(
+        f"  {C.DIM}   (New terminals load hooks automatically — you only need this once here.){C.RESET}"
+    )
+    if for_nova_up:
         print(
-            f"  {C.DIM}   Or:   source ~/.nova/nova_hooks.sh{C.RESET}"
+            f"  {C.DIM}   Then re-run your failing command and try{C.RESET} "
+            f"{C.BOLD}nova up{C.RESET} {C.DIM}again.{C.RESET}"
         )
+    else:
         print(
-            f"  {C.DIM}   Then re-run your failing command and try  nova up  again.{C.RESET}"
+            f"  {C.DIM}   Then try:{C.RESET} "
+            f"{C.BOLD}python3 -c \"import nosuch\"{C.RESET} "
+            f"{C.DIM}→{C.RESET} {C.BOLD}nova up{C.RESET}"
         )
+    print()
+
+
+def _print_hooks_inactive_help():
+    """Explain why capture failed and how to activate hooks in this terminal."""
+    if _hooks_installed() and _hooks_source_line_in_bashrc():
+        _print_hooks_activation_reminder(for_nova_up=True)
     elif _hooks_installed():
         print(
             f"  {C.YELLOW}⚠  Hooks file exists but ~/.bashrc does not source it.{C.RESET}"
         )
         print(f"  {C.DIM}   Run:  nova install-hooks{C.RESET}")
+        print(
+            f"  {C.DIM}   Then:  source ~/.bashrc  or open a new terminal.{C.RESET}"
+        )
     else:
         print(
             f"  {C.YELLOW}⚠  Nova shell hooks are not installed.{C.RESET}"
         )
-        print(
-            f"  {C.DIM}   Run:  nova install-hooks  then  source ~/.bashrc{C.RESET}"
-        )
+        print(f"  {C.DIM}   Run:  nova install-hooks{C.RESET}")
+        _print_hooks_activation_reminder()
 
 
 _PASSWORD_CMD_BLOCKLIST = frozenset({
@@ -1087,9 +1125,17 @@ def cmd_add(config):
 def cmd_setup():
     """nova setup — (Re)configure Nova."""
     cfg = interactive_setup()
-    if cfg is not None and not (_hooks_installed() and _hooks_source_line_in_bashrc()):
+    if cfg is None:
+        return
+
+    fresh_hooks = False
+    if not (_hooks_installed() and _hooks_source_line_in_bashrc()):
         print(f"\n  {C.DIM}▶ Installing shell hooks...{C.RESET}")
         cmd_install_hooks()
+        fresh_hooks = True
+
+    if not _hooks_active_in_parent_shell() and not fresh_hooks:
+        _print_hooks_activation_reminder(fresh_install=False)
 
 
 # ── nova add-llm ─────────────────────────────────────────────────────────────
@@ -1339,14 +1385,12 @@ def cmd_install_hooks():
             print(f"  {C.DIM}   Add manually:  {hook_line}{C.RESET}")
             return
 
-    print(
-        f"\n  {C.GREEN}Hooks installed.{C.RESET} "
-        f"{C.DIM}One-time: open a new terminal (or run{C.RESET} "
-        f"{C.CYAN}source ~/.bashrc{C.RESET}{C.DIM}).{C.RESET}"
-    )
-    print(
-        f"  {C.DIM}After that, hooks load automatically every time you open a terminal.{C.RESET}\n"
-    )
+    if not _hooks_active_in_parent_shell():
+        _print_hooks_activation_reminder(fresh_install=True)
+    else:
+        print(
+            f"\n  {C.GREEN}Hooks installed and already active in this terminal.{C.RESET}\n"
+        )
 
 
 def cmd_debug_session():
