@@ -200,6 +200,18 @@ $ nova use openai-gpt4
   ✅ Active provider set to 'openai-gpt4' (openai/gpt-4o)
 ```
 
+## Tests
+
+Offline unit tests (no API keys or network):
+
+```bash
+python3 -m unittest discover -s tests -v
+# or
+bash run_tests.sh
+```
+
+Covers Confluence RAG scoring/ranking, `Basic` auth header, KB fuzzy search, and `nova ask` answer polish.
+
 ## Configuration Storage
 
 ```

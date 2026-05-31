@@ -918,7 +918,7 @@ def _polish_ask_answer(text):
                 out.append(line)
             continue
         key = stripped.lower()
-        if stripped and seen.get(key, 0) >= 2:
+        if stripped and seen.get(key, 0) >= 1:
             continue
         if stripped:
             seen[key] = seen.get(key, 0) + 1
@@ -940,6 +940,32 @@ def _print_ask_answer(text):
     for line in polished.splitlines():
         print(f"  {line}")
     print()
+
+
+UP_PIPELINE_ORDER = ("KB", "Confluence", "AI")
+ASK_PIPELINE_ORDER = ("Confluence", "KB", "AI")
+_PIPELINE_LABELS = {
+    "off": "not set up",
+    "miss": "no match",
+    "matched": "matched",
+    "used": "used",
+    "skip": "skipped",
+}
+
+
+def _fresh_pipeline(order):
+    return {name: "skip" for name in order}
+
+
+def _print_pipeline_trail(trail, *, label="Pipeline"):
+    """Show which sources were checked (nova up: KB→Confluence→AI, ask: Confluence→KB→AI)."""
+    if not trail:
+        return
+    parts = [
+        f"{name} ({_PIPELINE_LABELS.get(state, state)})"
+        for name, state in trail
+    ]
+    print(f"  {C.DIM}{label}:{C.RESET} {' → '.join(parts)}")
 
 
 def call_ai_ask_stream(prompt, ai_config, *, max_tokens=500, system=None):
@@ -1357,6 +1383,8 @@ def _run_command(command):
 def cmd_up(config):
     """nova up — Error Intercept: KB → Confluence → AI."""
     t0 = time.monotonic()
+    pipeline = _fresh_pipeline(UP_PIPELINE_ORDER)
+    show_trail = False
     try:
         if _hooks_env_empty() and not _hooks_active_in_parent_shell():
             _print_hooks_not_active_short()
@@ -1395,7 +1423,8 @@ def cmd_up(config):
             return
 
         _print_up_header(last_cmd)
-        print(f"  {C.CYAN}🔍 Scanning...{C.RESET}")
+        show_trail = True
+        print(f"  {C.CYAN}🔍 Scanning KB → Confluence → AI...{C.RESET}")
 
         with _Spinner("Searching KB..."):
             merged = resolve_conflicts(kb_path)
@@ -1407,6 +1436,9 @@ def cmd_up(config):
             print(f"  {C.DIM}Merged {merged} OneDrive conflict entries.{C.RESET}")
 
         if results:
+            pipeline["KB"] = "used"
+            pipeline["Confluence"] = "skip"
+            pipeline["AI"] = "skip"
             print(f"  {C.GREEN}⚡ Found in KB{C.RESET}")
             best_entry, _best_score = results[0]
             cmd = _print_up_kb_hit(best_entry)
@@ -1417,28 +1449,40 @@ def cmd_up(config):
                     print(f"  {C.DIM}  • ({sc}%) {entry.get('error', '')[:60]}{C.RESET}")
             return
 
+        pipeline["KB"] = "miss"
         print(f"  {C.DIM}KB — no match.{C.RESET}")
 
         ai_pages = []
         use_confluence = False
         if confluence_index_exists():
             with _Spinner(f"Searching Confluence ({DEFAULT_INDEX_SPACE})..."):
-                cf_ranked = search_local_index(error_sig, top_n=SEARCH_LOCAL_TOP)
+                cf_pool = search_local_index(error_sig, top_n=_SEARCH_POOL_TOP)
+                cf_pool = sort_ranked_for_query(cf_pool, error_sig)
+                cf_ranked = cf_pool[:SEARCH_LOCAL_TOP]
             if cf_ranked:
                 print(f"  {C.GREEN}📄 Confluence{C.RESET}")
                 _print_local_search_results(cf_ranked)
                 if cf_ranked[0].get("score", 0) >= MIN_STRONG_SCORE:
                     ai_pages = select_pages_for_ai_context(
-                        cf_ranked, error_sig, top_n=SEARCH_AI_TOP
+                        cf_pool, error_sig, top_n=SEARCH_AI_TOP
                     )
                     use_confluence = True
+                    pipeline["Confluence"] = "used"
+                else:
+                    pipeline["Confluence"] = "matched"
             else:
+                pipeline["Confluence"] = "miss"
                 print(f"  {C.DIM}Confluence — no match.{C.RESET}")
         elif confluence_credentials_ready():
+            pipeline["Confluence"] = "off"
             print(f"  {C.DIM}Confluence — index not built (nova csync -r).{C.RESET}")
+        else:
+            pipeline["Confluence"] = "off"
+            print(f"  {C.DIM}Confluence — not configured (nova csetup).{C.RESET}")
 
         ai_config = get_active_ai_config()
         if not ai_config:
+            pipeline["AI"] = "off"
             if use_confluence:
                 print(
                     f"  {C.YELLOW}⚠  Confluence matches found but no AI configured. "
@@ -1463,6 +1507,7 @@ def cmd_up(config):
             if ai_result is None:
                 ai_result = call_ai(raw, ai_config, prompt=cf_prompt)
             if ai_result and ai_result.get("solution"):
+                pipeline["AI"] = "used"
                 if not streamed:
                     _print_up_fix_lines(ai_result["solution"], ai_result.get("command", ""))
                 _run_command_up(ai_result.get("command", ""))
@@ -1481,13 +1526,14 @@ def cmd_up(config):
                 return
             print(f"  {C.DIM}Confluence + AI — no solution.{C.RESET}")
 
-        print(f"  {C.CYAN}🤖 Asking AI...{C.RESET}")
+        print(f"  {C.CYAN}🤖 Asking AI (error only)...{C.RESET}")
         _print_up_ai_intro()
         ai_result = call_ai_stream(_truncate_for_ai(raw), ai_config)
         streamed = ai_result is not None
         if ai_result is None:
             ai_result = call_ai(_truncate_for_ai(raw), ai_config)
         if ai_result and ai_result.get("solution"):
+            pipeline["AI"] = "used"
             if not streamed:
                 _print_up_fix_lines(ai_result["solution"], ai_result.get("command", ""))
             _run_command_up(ai_result.get("command", ""))
@@ -1504,9 +1550,12 @@ def cmd_up(config):
                 else:
                     print(f"  {C.YELLOW}⚠  {res}{C.RESET}")
             return
+        pipeline["AI"] = "miss"
         print(f"  {C.YELLOW}⚠  AI couldn't provide a solution.{C.RESET}")
         _offer_manual_prompt(error_sig, raw, last_cmd)
     finally:
+        if show_trail:
+            _print_pipeline_trail([(n, pipeline[n]) for n in UP_PIPELINE_ORDER])
         _print_done_footer(t0)
 
 
@@ -2142,6 +2191,8 @@ def _ask_user_pick_confluence_page(ranked):
 def cmd_ask(config, query=None):
     """nova ask — Confluence → KB → AI."""
     t0 = time.monotonic()
+    pipeline = _fresh_pipeline(ASK_PIPELINE_ORDER)
+    show_trail = False
     try:
         if not query or not query.strip():
             try:
@@ -2156,15 +2207,28 @@ def cmd_ask(config, query=None):
         if stale:
             print(f"\n  {C.YELLOW}  {stale}{C.RESET}")
 
+        show_trail = True
+        print(f"  {C.DIM}Order: Confluence → KB → AI{C.RESET}")
+
         # 1. Confluence
         _ranked, ai_pages, use_confluence = _confluence_search_phase(
             query, interactive_pick=True, try_build_index=True
         )
+        if use_confluence:
+            pipeline["Confluence"] = "used"
+        elif _ranked:
+            pipeline["Confluence"] = "matched"
+        elif confluence_index_exists() or confluence_credentials_ready():
+            pipeline["Confluence"] = "miss"
+        else:
+            pipeline["Confluence"] = "off"
 
         # 2. KB
         kb_path = ensure_active_kb_ready()
         kb_strong, kb_results = _kb_search_phase(query, kb_path)
         if kb_strong:
+            pipeline["KB"] = "used"
+            pipeline["AI"] = "skip"
             entry, score = kb_strong
             print(f"\n  {C.GREEN}✓ Using KB match ({score}%){C.RESET}")
             display_solution(entry, score=score, source="KB")
@@ -2172,10 +2236,17 @@ def cmd_ask(config, query=None):
             if cmd:
                 _run_command(cmd)
             return
+        if kb_results:
+            pipeline["KB"] = "matched"
+        elif kb_path:
+            pipeline["KB"] = "miss"
+        else:
+            pipeline["KB"] = "off"
 
         # 3. AI
         ai_config = get_active_ai_config()
         if not ai_config:
+            pipeline["AI"] = "off"
             if use_confluence or kb_results:
                 print(
                     f"\n  {C.YELLOW}⚠  AI not configured — search results above only.{C.RESET}"
@@ -2208,28 +2279,36 @@ def cmd_ask(config, query=None):
                 max_tokens=450,
             )
             if answer:
+                pipeline["AI"] = "used"
                 _print_ask_answer(answer)
             else:
+                pipeline["AI"] = "miss"
                 print(f"  {C.RED}No response from AI.{C.RESET}\n")
         elif kb_results:
             prompt = _AI_ASK_PROMPT.format(query=query.strip()) + kb_section
-            print(f"  {C.CYAN}🤖 Answering with KB context...{C.RESET}\n")
+            print(f"  {C.CYAN}🤖 Answering with KB + AI...{C.RESET}\n")
             answer = call_ai_ask_stream(prompt, ai_config)
             if not answer:
+                pipeline["AI"] = "miss"
                 print(f"  {C.RED}No response from AI.{C.RESET}\n")
             else:
+                pipeline["AI"] = "used"
                 print()
         else:
-            print(f"  {C.CYAN}🤖 Asking AI...{C.RESET}\n")
+            print(f"  {C.CYAN}🤖 Asking AI (general knowledge)...{C.RESET}\n")
             answer = call_ai_ask_stream(
                 _AI_ASK_PROMPT.format(query=query.strip()),
                 ai_config,
             )
             if not answer:
+                pipeline["AI"] = "miss"
                 print(f"  {C.RED}No response from AI.{C.RESET}\n")
             else:
+                pipeline["AI"] = "used"
                 print()
     finally:
+        if show_trail:
+            _print_pipeline_trail([(n, pipeline[n]) for n in ASK_PIPELINE_ORDER])
         _print_done_footer(t0)
 
 

@@ -6,6 +6,7 @@ Nova CLI — NGA Confluence local RAG index + search for nova ask.
 import base64
 import html
 import json
+import math
 import os
 import re
 import urllib.error
@@ -38,6 +39,18 @@ _AI_DOC_CHAR_LIMIT = 12000
 _AI_DOC_CHAR_LIMIT_ASK = 5000
 _AI_CONTEXT_TOTAL_CHARS = 14000
 _SEARCH_POOL_TOP = 15
+_BM25_K1 = 1.2
+_BM25_B = 0.75
+_TITLE_TERM_REPEAT = 3
+_BM25_WEIGHT = 100.0
+_HEURISTIC_WEIGHT = 1.0
+
+_QUERY_TYPOS = {
+    "thorugh": "through",
+    "instal": "install",
+    "debuging": "debugging",
+    "enviroment": "environment",
+}
 
 _STOPWORDS = frozenset({
     "the", "is", "and", "to", "a", "in", "of", "for", "with", "that", "this",
@@ -380,9 +393,104 @@ def split_query_words(query):
     words = []
     for w in re.split(r"\s+", (query or "").lower()):
         w = w.strip(".,;:!?\"'()[]{}")
+        w = _QUERY_TYPOS.get(w, w)
         if len(w) >= 2 and w not in _STOPWORDS:
             words.append(w)
     return words
+
+
+def expand_query_terms(query_words):
+    """Add stem/synonym tokens so debug/debugger and install/setup align."""
+    terms = []
+    seen = set()
+    for w in query_words:
+        for t in _term_variants(w):
+            if t not in seen:
+                seen.add(t)
+                terms.append(t)
+    return terms
+
+
+def _term_variants(word):
+    w = (word or "").lower()
+    if not w:
+        return []
+    out = [w]
+    if w.startswith("debug"):
+        out.append("debug")
+    if w in ("install", "setup", "configure"):
+        out.extend(["install", "setup"])
+    if w == "vscode":
+        out.extend(["vscode", "code"])
+    return out
+
+
+def _tokenize_search(text, min_len=2):
+    tokens = []
+    for w in re.findall(r"[a-z0-9][a-z0-9_-]{0,}", (text or "").lower()):
+        if len(w) >= min_len and w not in _STOPWORDS:
+            tokens.append(w)
+    return tokens
+
+
+def _page_document_tokens(page):
+    """Token stream for BM25; title terms repeated for higher field weight."""
+    title = page.get("title") or ""
+    body = page.get("full_text") or page.get("text") or page.get("summary") or ""
+    title_toks = _tokenize_search(title)
+    body_toks = _tokenize_search(body)
+    return title_toks * _TITLE_TERM_REPEAT + body_toks
+
+
+def _build_bm25_corpus(pages):
+    docs = [_page_document_tokens(p) for p in pages]
+    n_docs = len(docs)
+    avgdl = sum(len(d) for d in docs) / n_docs if n_docs else 1.0
+    df = Counter()
+    for doc in docs:
+        for term in set(doc):
+            df[term] += 1
+    return docs, df, n_docs, avgdl
+
+
+def _bm25_idf(term, n_docs, df):
+    n = df.get(term, 0)
+    return math.log(1.0 + (n_docs - n + 0.5) / (n + 0.5))
+
+
+def _bm25_score_document(query_terms, doc_tokens, df, n_docs, avgdl):
+    if not query_terms or not doc_tokens:
+        return 0.0
+    tf = Counter(doc_tokens)
+    dl = len(doc_tokens)
+    score = 0.0
+    for term in query_terms:
+        freq = tf.get(term, 0)
+        if freq == 0:
+            continue
+        idf = _bm25_idf(term, n_docs, df)
+        denom = freq + _BM25_K1 * (1.0 - _BM25_B + _BM25_B * dl / avgdl)
+        score += idf * (freq * (_BM25_K1 + 1.0)) / denom
+    return score
+
+
+def _phrase_boost(page, phrase, query_words):
+    """Extra points for multi-word phrases in title (strong intent signal)."""
+    if not phrase or len(phrase) < 4:
+        return 0
+    title_l = (page.get("title") or "").lower()
+    text_l = (page.get("full_text") or page.get("summary") or "").lower()
+    boost = 0
+    if phrase in title_l:
+        boost += 15
+    elif phrase in text_l:
+        boost += 6
+    if len(query_words) >= 2:
+        for i in range(len(query_words) - 1):
+            bigram = f"{query_words[i]} {query_words[i + 1]}"
+            if bigram in title_l:
+                boost += 8
+    return boost
 
 
 def _word_matches_text(word, text_l):
@@ -568,10 +676,27 @@ def _score_rag_page(page, query_words, phrase):
     return score
 
 
+def _combined_page_score(page, query_words, phrase, doc_tokens, df, n_docs, avgdl):
+    """
+    BM25 (corpus-aware) + legacy heuristics + phrase/bigram boosts.
+    Rare terms in NGA (e.g. kairos in title) rank higher than common filler.
+    """
+    query_terms = expand_query_terms(query_words)
+    bm25 = _bm25_score_document(query_terms, doc_tokens, df, n_docs, avgdl)
+    heuristic = _score_rag_page(page, query_words, phrase)
+    phrase_extra = _phrase_boost(page, phrase, query_words)
+    total = (
+        bm25 * _BM25_WEIGHT
+        + heuristic * _HEURISTIC_WEIGHT
+        + phrase_extra
+    )
+    return round(total, 2)
+
+
 def search_local_index(query, top_n=_SEARCH_LOCAL_TOP):
     """
-    Search local RAG index. Returns top N dicts with score, title, url, summary,
-    id, space, full_text (for AI).
+    Search local RAG index (BM25 + heuristics). Returns top N dicts with score,
+    title, url, summary, id, space, full_text (for AI).
     """
     data = load_index_data()
     if not data:
@@ -585,9 +710,13 @@ def search_local_index(query, top_n=_SEARCH_LOCAL_TOP):
     if not query_words and not phrase:
         return []
 
+    doc_tokens_list, df, n_docs, avgdl = _build_bm25_corpus(pages)
+
     scored = []
-    for page in pages:
-        score = _score_rag_page(page, query_words, phrase)
+    for i, page in enumerate(pages):
+        score = _combined_page_score(
+            page, query_words, phrase, doc_tokens_list[i], df, n_docs, avgdl
+        )
         if score > 0:
             item = dict(page)
             item["score"] = score
@@ -599,20 +728,27 @@ def search_local_index(query, top_n=_SEARCH_LOCAL_TOP):
 
 
 def ai_rank_score(page, query):
-    """Relevance score for ordering UI and AI context (higher = better fit)."""
+    """Relevance for AI page pick; uses search score when already computed."""
+    if page.get("score") is not None:
+        return page["score"]
     query_words = split_query_words(query)
-    base = page.get("score", 0)
-    title_l = (page.get("title") or "").lower()
-    if title_l.startswith("wip:") or title_l.startswith("[wip]"):
-        base -= 8
-    title_hits = sum(1 for w in query_words if _word_matches_text(w, title_l))
-    extra = title_hits * 6
-    if any(w in query_words for w in ("debug", "debugger", "debugging")) and "debug" in title_l:
-        extra += 10
-    return base + extra
+    phrase = (query or "").strip().lower()
+    doc_tokens = _page_document_tokens(page)
+    data = load_index_data()
+    pages = (data or {}).get("pages") or []
+    if pages:
+        _, df, n_docs, avgdl = _build_bm25_corpus(pages)
+    else:
+        df, n_docs, avgdl = Counter(), 1, 1.0
+    return _combined_page_score(page, query_words, phrase, doc_tokens, df, n_docs, avgdl)
 
 
 def sort_ranked_for_query(ranked_pages, query):
+    if ranked_pages and all(p.get("score") is not None for p in ranked_pages):
+        return sorted(
+            ranked_pages,
+            key=lambda p: (-p["score"], p.get("title") or ""),
+        )
     return sorted(
         ranked_pages,
         key=lambda p: (-ai_rank_score(p, query), p.get("title") or ""),

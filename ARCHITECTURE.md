@@ -16,29 +16,36 @@ File: `~/.nova/confluence_index.json`
 
 Built by `build_confluence_index()` / refreshed by `nova csync -r`.
 
-## `nova up` flow
+## `nova up` flow (KB → Confluence → AI)
 
 1. Capture last terminal error (hooks)
-2. **KB** — fuzzy search; strong match → show fix and stop
-3. **Confluence** — local NGA index; strong match → AI with page text
-4. **AI** — error-only fallback; optional save to KB
+2. **KB** — fuzzy search; strong match → show fix and **stop** (Confluence/AI skipped)
+3. **Confluence** — local BM25 search on error text; strong match → pages go to AI
+4. **AI** — Confluence+error prompt, else error-only; optional save to KB
 
-## `nova ask` flow
+Footer: `Pipeline: KB (…) → Confluence (…) → AI (…)`
+
+## `nova ask` flow (Confluence → KB → AI)
 
 1. Warn if `last_sync` > 7 days old
-2. **Confluence** — `search_local_index(query)`; top 5; weak → user pick
-3. **KB** — fuzzy search; ≥70% match → show KB solution and stop
-4. **AI** — Confluence context, KB hints, or general knowledge
+2. **Confluence** — BM25 search; top 5; weak → user pick; strong → pages for AI
+3. **KB** — fuzzy search; ≥70% → show KB and **stop**; weaker matches → hints for AI
+4. **AI** — Confluence excerpts (+ KB hints), or KB+AI, or general knowledge
 
-## Scoring (local)
+Footer: `Pipeline: Confluence (…) → KB (…) → AI (…)`
 
-| Signal | Points |
-|--------|--------|
-| Query word in title | +5 each |
-| Query word in keywords | +3 each |
-| Query word in full_text | +1 each |
-| Exact phrase in title | +10 |
-| Exact phrase in full_text | +5 |
+## Scoring (local, no embeddings)
+
+Search uses **BM25** over each page (title terms counted 3×) plus heuristic boosts:
+
+| Layer | Role |
+|--------|------|
+| **BM25** | Corpus-aware ranking — rare terms (e.g. `kairos` in title) beat pages that only mention them once in long notes |
+| **Heuristics** | Title/keyword/body word hits, WIP penalty, debug-in-title boost |
+| **Phrases** | Full query phrase and bigrams in title get extra points |
+| **Query expansion** | `debugger`→`debug`, `install`↔`setup`, common typos (`thorugh`→`through`) |
+
+Displayed `score` is a combined value (BM25×100 + heuristics + phrase). Not comparable across different queries.
 
 ## Commands
 
@@ -48,3 +55,7 @@ Built by `build_confluence_index()` / refreshed by `nova csync -r`.
 | `nova csync -r` | Rescan NGA, show +new / ~updated |
 | `nova ask` | Confluence → KB → AI |
 | `nova up` | KB → Confluence → AI |
+
+## Tests
+
+`tests/` — `unittest` suite (run `bash run_tests.sh`). Uses a temp index file; no live Confluence calls except one mocked HTTP test for auth headers.
