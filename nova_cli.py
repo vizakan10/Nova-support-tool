@@ -83,6 +83,7 @@ from confluence_manager import (
     load_confluence_config,
     pages_for_ai_context,
     select_pages_for_ai_context,
+    sort_ranked_for_query,
     _SEARCH_POOL_TOP,
     parse_priority_spaces_input,
     refresh_confluence_index,
@@ -784,16 +785,36 @@ You are a concise technical assistant. Answer the following in a clear, short wa
 Question: {query}
 """
 
+_ASK_CONFLUENCE_SYSTEM = (
+    "You write short, professional internal runbooks for engineers. "
+    "Use only facts from the provided excerpts. Never invent configs, JSON, or YAML."
+)
+
 _AI_CONFLUENCE_ASK_PROMPT = """\
-You are a technical assistant for a software team. Answer ONLY from the Confluence excerpts below.
+Answer the question using ONLY the Confluence excerpts below.
+
+Output format (markdown — use these headings exactly):
+
+## Summary
+1–2 sentences: what the user needs to do.
+
+## Steps
+Numbered list of 3–7 actionable steps. Each step is one line. Include commands only if they appear in the excerpts.
+
+## Prerequisites
+Optional section — bullet list, only if the excerpts mention requirements. Omit entirely if none.
+
+## Reference
+- [Page title](url) — primary doc to read
 
 Rules:
-- Do not invent file paths, JSON, YAML, or config blocks. Quote only what appears in the excerpts.
-- Be concise: short numbered steps (max ~15 lines of answer text).
-- Prefer the page whose title best matches the question; cite its title and URL.
-- If excerpts lack enough detail, say which linked page to open and stop.
+- Maximum 300 words total.
+- Do NOT paste large config files, launch.json, or JSON/YAML blocks.
+- If a small command appears in the excerpts, one inline `command` per step is OK.
+- Prefer the page whose title best matches the question.
+- If excerpts are insufficient, say so under Summary and list the Reference link only.
 
-Confluence context:
+Confluence excerpts:
 {confluence_excerpts}
 {kb_section}
 Question: {question}
@@ -817,7 +838,7 @@ _ASK_KB_STRONG_THRESHOLD = 70
 _ASK_KB_DISPLAY_THRESHOLD = 55
 
 
-def call_ai_ask(query, ai_config):
+def call_ai_ask(query, ai_config, *, prompt=None, system=None, max_tokens=500):
     """Call AI with a free-form question. Returns response text or None."""
     if not query or not ai_config:
         return None
@@ -827,16 +848,26 @@ def call_ai_ask(query, ai_config):
     endpoint = ai_config.get("endpoint", "")
     if not all([provider, api_key, model, endpoint]):
         return None
-    prompt = _AI_ASK_PROMPT.format(query=query.strip())
+    if prompt is None:
+        prompt = _AI_ASK_PROMPT.format(query=query.strip())
+    sys_msg = system or "You are a concise technical assistant."
     if provider == "claude":
-        body = {"model": model, "max_tokens": 500, "messages": [{"role": "user", "content": prompt}]}
+        body = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": sys_msg,
+            "messages": [{"role": "user", "content": prompt}],
+        }
         headers = {"Content-Type": "application/json", "x-api-key": api_key, "anthropic-version": "2023-06-01"}
     else:
         body = {
             "model": model,
-            "messages": [{"role": "system", "content": "You are a concise technical assistant."}, {"role": "user", "content": prompt}],
-            "max_tokens": 500,
-            "temperature": 0.3,
+            "messages": [
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.2,
         }
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
     headers["User-Agent"] = NOVA_HTTP_USER_AGENT
@@ -857,7 +888,61 @@ def call_ai_ask(query, ai_config):
     return (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
 
 
-def call_ai_ask_stream(prompt, ai_config, *, max_tokens=500):
+def _polish_ask_answer(text):
+    """Trim repetition, huge invented config blocks, and excess length."""
+    if not text:
+        return text
+    lines = text.splitlines()
+    out = []
+    seen = {}
+    in_fence = False
+    fence_lines = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if not in_fence:
+                in_fence = True
+                fence_lines = 0
+                out.append(line)
+                continue
+            in_fence = False
+            if fence_lines > 25:
+                out.append("```")
+                out.append("  … (config block omitted — see Confluence page)")
+                continue
+            out.append(line)
+            continue
+        if in_fence:
+            fence_lines += 1
+            if fence_lines <= 25:
+                out.append(line)
+            continue
+        key = stripped.lower()
+        if stripped and seen.get(key, 0) >= 2:
+            continue
+        if stripped:
+            seen[key] = seen.get(key, 0) + 1
+        if "stopon" in key and "false" in key:
+            continue
+        out.append(line)
+    text = "\n".join(out).strip()
+    if len(text) > 3200:
+        text = text[:3200].rsplit("\n", 1)[0] + "\n\n… (answer trimmed — open Reference link for full detail)"
+    return text
+
+
+def _print_ask_answer(text):
+    """Print a polished, indented answer for nova ask."""
+    polished = _polish_ask_answer(text)
+    if not polished:
+        return
+    print()
+    for line in polished.splitlines():
+        print(f"  {line}")
+    print()
+
+
+def call_ai_ask_stream(prompt, ai_config, *, max_tokens=500, system=None):
     """Stream a free-form AI answer to stdout. Returns full text or None."""
     if not prompt or not ai_config:
         return None
@@ -868,11 +953,13 @@ def call_ai_ask_stream(prompt, ai_config, *, max_tokens=500):
     if not all([provider, api_key, model, endpoint]):
         return None
 
+    sys_msg = system or "You are a concise technical assistant."
     if provider == "claude":
         body = {
             "model": model,
             "max_tokens": max_tokens,
             "stream": True,
+            "system": sys_msg,
             "messages": [{"role": "user", "content": prompt}],
         }
         headers = {
@@ -886,11 +973,11 @@ def call_ai_ask_stream(prompt, ai_config, *, max_tokens=500):
             "model": model,
             "stream": True,
             "messages": [
-                {"role": "system", "content": "You are a concise technical assistant."},
+                {"role": "system", "content": sys_msg},
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": max_tokens,
-            "temperature": 0.3,
+            "temperature": 0.2,
         }
         headers = {
             "Content-Type": "application/json",
@@ -1950,6 +2037,7 @@ def _confluence_search_phase(query, *, interactive_pick=True, try_build_index=Tr
     if has_index:
         print(f"\n  {C.CYAN}🔍 Searching Confluence ({DEFAULT_INDEX_SPACE})...{C.RESET}")
         pool = search_local_index(query, top_n=_SEARCH_POOL_TOP)
+        pool = sort_ranked_for_query(pool, query)
         ranked = pool[:SEARCH_LOCAL_TOP]
         if ranked:
             _print_local_search_results(ranked)
@@ -1970,7 +2058,9 @@ def _confluence_search_phase(query, *, interactive_pick=True, try_build_index=Tr
                     pool, query, top_n=SEARCH_AI_TOP
                 )
                 use_confluence = True
-                print(f"\n  {C.GREEN}📄 Using top {len(ai_pages)} page(s) for AI:{C.RESET}")
+                n = len(ai_pages)
+                label_pages = "primary page" if n == 1 else f"top {n} pages"
+                print(f"\n  {C.GREEN}📄 Using {label_pages} for AI:{C.RESET}")
                 for hit in ai_pages:
                     sk = hit.get("space_key") or DEFAULT_INDEX_SPACE
                     print(f"     {C.BOLD}•{C.RESET} [{sk}] {hit.get('title')}")
@@ -2109,23 +2199,36 @@ def cmd_ask(config, query=None):
             label = "Confluence"
             if kb_results:
                 label += " + KB hints"
-            print(f"  {C.CYAN}🤖 Answering with {label}...{C.RESET}\n")
-            answer = call_ai_ask_stream(prompt, ai_config)
+            print(f"  {C.CYAN}🤖 Answering with {label}...{C.RESET}")
+            answer = call_ai_ask(
+                query,
+                ai_config,
+                prompt=prompt,
+                system=_ASK_CONFLUENCE_SYSTEM,
+                max_tokens=450,
+            )
+            if answer:
+                _print_ask_answer(answer)
+            else:
+                print(f"  {C.RED}No response from AI.{C.RESET}\n")
         elif kb_results:
             prompt = _AI_ASK_PROMPT.format(query=query.strip()) + kb_section
             print(f"  {C.CYAN}🤖 Answering with KB context...{C.RESET}\n")
             answer = call_ai_ask_stream(prompt, ai_config)
+            if not answer:
+                print(f"  {C.RED}No response from AI.{C.RESET}\n")
+            else:
+                print()
         else:
             print(f"  {C.CYAN}🤖 Asking AI...{C.RESET}\n")
             answer = call_ai_ask_stream(
                 _AI_ASK_PROMPT.format(query=query.strip()),
                 ai_config,
             )
-
-        if not answer:
-            print(f"  {C.RED}No response from AI.{C.RESET}\n")
-        else:
-            print()
+            if not answer:
+                print(f"  {C.RED}No response from AI.{C.RESET}\n")
+            else:
+                print()
     finally:
         _print_done_footer(t0)
 

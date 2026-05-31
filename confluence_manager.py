@@ -556,7 +556,10 @@ def _score_rag_page(page, query_words, phrase):
     if title_hits >= 2:
         score += 10
     if title_l.startswith("wip:") or title_l.startswith("[wip]"):
-        score -= 4
+        score -= 8
+    if any(w in query_words for w in ("debug", "debugger", "debugging")):
+        if "debug" in title_l:
+            score += 12
     if phrase and len(phrase) >= 4:
         if phrase in title_l:
             score += 10
@@ -595,24 +598,43 @@ def search_local_index(query, top_n=_SEARCH_LOCAL_TOP):
     return scored[:top_n]
 
 
+def ai_rank_score(page, query):
+    """Relevance score for ordering UI and AI context (higher = better fit)."""
+    query_words = split_query_words(query)
+    base = page.get("score", 0)
+    title_l = (page.get("title") or "").lower()
+    if title_l.startswith("wip:") or title_l.startswith("[wip]"):
+        base -= 8
+    title_hits = sum(1 for w in query_words if _word_matches_text(w, title_l))
+    extra = title_hits * 6
+    if any(w in query_words for w in ("debug", "debugger", "debugging")) and "debug" in title_l:
+        extra += 10
+    return base + extra
+
+
+def sort_ranked_for_query(ranked_pages, query):
+    return sorted(
+        ranked_pages,
+        key=lambda p: (-ai_rank_score(p, query), p.get("title") or ""),
+    )
+
+
 def select_pages_for_ai_context(ranked_pages, query, top_n=_SEARCH_AI_TOP):
     """Pick best pages for AI using query + score (title relevance beats tie scores)."""
     if not ranked_pages:
         return []
-    query_words = split_query_words(query)
-
-    def _ai_rank(page):
-        base = page.get("score", 0)
-        title_l = (page.get("title") or "").lower()
-        if title_l.startswith("wip:") or title_l.startswith("[wip]"):
-            base -= 4
-        title_hits = sum(1 for w in query_words if _word_matches_text(w, title_l))
-        return base + (title_hits * 6)
-
-    ordered = sorted(ranked_pages, key=lambda p: (-_ai_rank(p), p.get("title") or ""))
+    ordered = sort_ranked_for_query(ranked_pages, query)
+    best = ai_rank_score(ordered[0], query)
+    second = ai_rank_score(ordered[1], query) if len(ordered) > 1 else 0
+    if best - second >= 10:
+        use_n = 1
+    elif best - second >= 5:
+        use_n = min(2, top_n)
+    else:
+        use_n = top_n
     return pages_for_ai_context(
         ordered,
-        top_n=top_n,
+        top_n=use_n,
         char_limit_per_page=_AI_DOC_CHAR_LIMIT_ASK,
         total_char_limit=_AI_CONTEXT_TOTAL_CHARS,
     )
