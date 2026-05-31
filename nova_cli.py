@@ -433,15 +433,30 @@ def detect_error(text):
 #  AI FALLBACK
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_AI_PROMPT = """\
-You are a senior DevOps engineer helping a colleague.
-They encountered this error:
+_AI_SYSTEM_PROMPT = (
+    "You help debug failed commands in a Linux terminal (bash/WSL). "
+    "Suggest fixes as shell commands for that environment."
+)
 
+
+def _shell_context_label():
+    """Human-readable shell label for prompts (from $SHELL)."""
+    shell_path = os.environ.get("SHELL", "").strip()
+    name = os.path.basename(shell_path) if shell_path else "bash"
+    if name in ("bash", "zsh", "sh", "dash", "fish"):
+        return f"{name} shell (Linux/WSL terminal)"
+    return f"{name or 'bash'} shell"
+
+
+_AI_PROMPT = """\
+You are helping a colleague fix a command that failed in a {shell}.
+
+Error / output:
 {error}
 
 Respond in EXACTLY this format (no extra text):
 Solution: <one-sentence explanation>
-Command: <exact CLI command to fix it>
+Command: <exact shell command to fix it — bash/WSL unless clearly otherwise>
 """
 
 
@@ -464,21 +479,20 @@ def _redact_for_ai(text):
 
 
 _MANUAL_PROMPT = """\
-You are a senior DevOps engineer helping a colleague.
-I ran the following command and it failed.
+You are helping a colleague fix a command that failed in a {shell}.
 
 Command:
 {command}
 
-Error:
+Error (main line):
 {error}
 
-Full output:
+Full terminal output:
 {output}
 
 Respond in EXACTLY this format (no extra text):
 Solution: <one-sentence explanation>
-Command: <exact CLI command to fix it>
+Command: <exact shell command to fix it — bash/WSL unless clearly otherwise>
 """
 
 
@@ -488,6 +502,7 @@ def _build_manual_prompt(error_sig, raw, last_cmd):
     error = _redact_for_ai(error_sig) if error_sig else "(see output below)"
     output = _redact_for_ai(_truncate_for_ai(raw)) if raw else "(none)"
     return _MANUAL_PROMPT.format(
+        shell=_shell_context_label(),
         command=command.strip() or "(unknown)",
         error=error.strip() or "(see output below)",
         output=output.strip() or "(none)",
@@ -507,7 +522,10 @@ def call_ai(error_text, ai_config):
     if not all([provider, api_key, model, endpoint]):
         return None
 
-    prompt = _AI_PROMPT.format(error=_redact_for_ai(error_text))
+    prompt = _AI_PROMPT.format(
+        shell=_shell_context_label(),
+        error=_redact_for_ai(error_text),
+    )
 
     if provider == "claude":
         body = {
@@ -524,7 +542,7 @@ def call_ai(error_text, ai_config):
         body = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "You are a concise DevOps assistant."},
+                {"role": "system", "content": _AI_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": 300,
@@ -622,7 +640,10 @@ def call_ai_stream(error_text, ai_config):
     if not all([provider, api_key, model, endpoint]):
         return None
 
-    prompt = _AI_PROMPT.format(error=_redact_for_ai(error_text))
+    prompt = _AI_PROMPT.format(
+        shell=_shell_context_label(),
+        error=_redact_for_ai(error_text),
+    )
 
     if provider == "claude":
         body = {
@@ -642,7 +663,7 @@ def call_ai_stream(error_text, ai_config):
             "model": model,
             "stream": True,
             "messages": [
-                {"role": "system", "content": "You are a concise DevOps assistant."},
+                {"role": "system", "content": _AI_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": 300,
