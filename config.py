@@ -366,6 +366,10 @@ def _generate_nickname(provider_type, model, existing_providers):
 #  INTERACTIVE SETUP (first-time)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_SETUP_BACK_LABEL = "0 ← Back"
+_SETUP_BACK_HINT = "Type 0 to go back"
+
+
 def interactive_setup():
     """First-time setup wizard."""
     try:
@@ -387,142 +391,326 @@ def _get_style(q):
     ])
 
 
-def _setup_rich(q):
-    style = _get_style(q)
-    print("\n╔══════════════════════════════════════════╗")
-    print("║        🚀  Nova CLI — First Setup        ║")
-    print("╚══════════════════════════════════════════╝\n")
+def _setup_input_is_back(value):
+    return str(value or "").strip() == "0"
 
-    kb_path = q.text(
-        "📁 KB folder path (or path to kb.json):",
-        instruction="e.g. /mnt/c/Users/you/OneDrive/Nova-KB  or  .../Nova-tool-Db/kb.json",
-        style=style,
-    ).ask()
-    if kb_path is None: return None
-    # Strip whitespace (including newlines) and quotes so paste doesn't break
-    kb_path = kb_path.strip().strip('"\'').replace("\n", " ").replace("\r", " ").strip()
-    # If newline was replaced by space, fix "folder \kb.json" or "folder kb.json" -> "folder/kb.json"
-    kb_path = re.sub(r'\s+[\\/]?\s*kb\.json\s*$', '/kb.json', kb_path, flags=re.IGNORECASE).strip()
+
+def _parse_kb_path_input(raw):
+    """
+    Normalize and validate KB path input.
+    Returns (True, path) or (False, error_message).
+    """
+    kb_path = raw.strip().strip('"\'').replace("\n", " ").replace("\r", " ").strip()
+    kb_path = re.sub(
+        r"\s+[\\/]?\s*kb\.json\s*$", "/kb.json", kb_path, flags=re.IGNORECASE
+    ).strip()
     if not kb_path:
-        print("   ❌ KB path cannot be empty.")
-        return None
+        return False, "   ❌ KB path cannot be empty."
 
-    # If user entered path to kb.json, use the folder that contains it (only if there is a folder part)
     if kb_path.rstrip().endswith("kb.json"):
         _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
         if _dir:
             kb_path = _dir
 
-    # Normalize: Windows path -> /mnt/... when on WSL so it works
     kb_path = _normalize_kb_path(kb_path)
 
-    # Never use a file path: if it's a file or ends with kb.json, use the folder
     if kb_path and (os.path.isfile(kb_path) or kb_path.rstrip().endswith("kb.json")):
         _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
         if _dir:
             kb_path = _dir
     kb_path = (kb_path or "").rstrip().rstrip("/")
 
-    # Reject empty or path that is just "kb.json" (no folder)
     if not kb_path:
-        print("   ❌ KB path is empty or invalid (e.g. only 'kb.json' was entered). Please enter the folder path.")
-        return None
+        return False, (
+            "   ❌ KB path is empty or invalid (e.g. only 'kb.json' was entered). "
+            "Please enter the folder path."
+        )
     if os.path.basename(kb_path.rstrip("/")) == "kb.json":
-        print("   ❌ Please enter the folder that contains kb.json (e.g. C:\\Users\\...\\Nova-tool-Db), not the file path.")
-        return None
+        return False, (
+            "   ❌ Please enter the folder that contains kb.json, "
+            "not the file path."
+        )
+    return True, kb_path
 
-    if not os.path.isdir(kb_path):
-        create = q.confirm(f"   '{kb_path}' doesn't exist. Create it?", default=True, style=style).ask()
-        if create:
+
+def _commit_kb_main(kb_path):
+    _ensure_kb_file(kb_path)
+    add_kb_source("main", kb_path)
+    cfg = load_config() or {}
+    cfg["active_kb"] = "main"
+    cfg["added_by"] = getpass.getuser()
+    save_config(cfg)
+
+
+def _setup_print_header():
+    print("\n╔══════════════════════════════════════════╗")
+    print("║        🚀  Nova CLI — First Setup        ║")
+    print("╚══════════════════════════════════════════╝")
+    print(f"  {_SETUP_BACK_HINT} on any step (0 on first step = cancel)\n")
+
+
+def _setup_rich_select_with_back(q, message, choices, style):
+    """questionary select; first choice is Back. Returns choice, 'BACK', or None (cancel)."""
+    full = [_SETUP_BACK_LABEL] + list(choices)
+    picked = q.select(message, choices=full, style=style).ask()
+    if picked is None:
+        return None
+    if picked == _SETUP_BACK_LABEL or _setup_input_is_back(picked):
+        return "BACK"
+    return picked
+
+
+def _setup_rich(q):
+    style = _get_style(q)
+    _setup_print_header()
+
+    step = 0
+    kb_path = None
+    p_type = None
+    api_key = model = endpoint = nickname = None
+
+    while True:
+        if step == 0:
+            kb_path = q.text(
+                "📁 KB folder path (or path to kb.json):",
+                instruction=(
+                    "e.g. /mnt/c/Users/you/OneDrive/Nova-KB  —  "
+                    f"{_SETUP_BACK_HINT} (cancel setup)"
+                ),
+                style=style,
+            ).ask()
+            if kb_path is None:
+                return None
+            if _setup_input_is_back(kb_path):
+                print("   Setup cancelled.")
+                return None
+            ok, result = _parse_kb_path_input(kb_path)
+            if not ok:
+                print(result)
+                continue
+            kb_path = result
+            if not os.path.isdir(kb_path):
+                step = 1
+            else:
+                _commit_kb_main(kb_path)
+                step = 2
+
+        elif step == 1:
+            picked = _setup_rich_select_with_back(
+                q,
+                f"   '{kb_path}' doesn't exist. Create it?",
+                ["Yes, create folder", "No, re-enter path"],
+                style,
+            )
+            if picked is None:
+                return None
+            if picked == "BACK":
+                step = 0
+                continue
+            if picked == "No, re-enter path":
+                step = 0
+                continue
             if os.path.isfile(kb_path):
                 kb_path = os.path.dirname(kb_path)
             if not kb_path:
                 print("   ❌ Cannot create: path is invalid.")
-                return None
+                step = 0
+                continue
             os.makedirs(kb_path, exist_ok=True)
-        else:
-            return None
+            _commit_kb_main(kb_path)
+            step = 2
 
-    _ensure_kb_file(kb_path)
-    add_kb_source("main", kb_path)
+        elif step == 2:
+            provider_choices = list(AI_PROVIDERS.keys()) + ["Skip (no AI)"]
+            p_type = _setup_rich_select_with_back(
+                q,
+                "🤖 Choose AI provider (optional):",
+                provider_choices,
+                style,
+            )
+            if p_type is None:
+                return None
+            if p_type == "BACK":
+                step = 0
+                continue
+            if p_type == "Skip (no AI)":
+                cfg = load_config() or {}
+                _print_summary(cfg)
+                return cfg
+            step = 3
 
-    cfg = load_config() or {}
-    cfg["active_kb"] = "main"
-    cfg["added_by"] = getpass.getuser()
-    save_config(cfg)
+        elif step == 3:
+            api_key = q.password(
+                "🔑 API key:",
+                instruction=_SETUP_BACK_HINT,
+                style=style,
+            ).ask()
+            if api_key is None:
+                return None
+            if _setup_input_is_back(api_key):
+                step = 2
+                continue
+            if not api_key:
+                print("   ❌ API key cannot be empty.")
+                continue
+            step = 4
 
-    # First AI provider
-    provider_choices = list(AI_PROVIDERS.keys()) + ["Skip (no AI)"]
-    p_type = q.select("🤖 Choose AI provider (optional):", choices=provider_choices, style=style).ask()
-    if p_type and p_type != "Skip (no AI)":
-        _add_provider_rich(q, style, p_type, set_active=True)
+        elif step == 4:
+            models = AI_PROVIDERS[p_type]["models"]
+            model = _setup_rich_select_with_back(
+                q, "📦 Model:", models, style
+            )
+            if model is None:
+                return None
+            if model == "BACK":
+                step = 3
+                continue
+            step = 5
 
-    cfg = load_config() or {}
-    _print_summary(cfg)
-    return cfg
+        elif step == 5:
+            default_ep = AI_PROVIDERS[p_type]["endpoint"]
+            endpoint = q.text(
+                "🌐 Endpoint:",
+                default=default_ep,
+                instruction=_SETUP_BACK_HINT,
+                style=style,
+            ).ask()
+            if endpoint is None:
+                return None
+            if _setup_input_is_back(endpoint):
+                step = 4
+                continue
+            endpoint = endpoint or default_ep
+            step = 6
+
+        elif step == 6:
+            existing = load_providers()
+            default_nick = _generate_nickname(p_type, model, existing)
+            nickname = q.text(
+                "🏷  Nickname:",
+                default=default_nick,
+                instruction=_SETUP_BACK_HINT,
+                style=style,
+            ).ask()
+            if nickname is None:
+                return None
+            if _setup_input_is_back(nickname):
+                step = 5
+                continue
+            nickname = nickname or default_nick
+            add_provider(nickname, p_type, model, endpoint, api_key)
+            cfg = load_config() or {}
+            cfg["active_provider"] = nickname
+            save_config(cfg)
+            _print_summary(cfg)
+            return cfg
+
+
+def _setup_basic_read(prompt, *, allow_back=True):
+    """Read a line; return BACK sentinel, None on EOF, or stripped value."""
+    hint = f" ({_SETUP_BACK_HINT})" if allow_back else " (0 = cancel)"
+    try:
+        value = input(f"{prompt}{hint}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if allow_back and _setup_input_is_back(value):
+        return "BACK"
+    if not allow_back and _setup_input_is_back(value):
+        print("   Setup cancelled.")
+        return None
+    return value
 
 
 def _setup_basic():
-    print("\n══════════════════════════════════════════\n        🚀  Nova CLI — First Setup\n══════════════════════════════════════════\n")
-    try:
-        kb_path = input("📁 KB folder path (or path to kb.json): ").strip().strip('"\'').replace("\n", " ").replace("\r", " ").strip()
-    except (EOFError, KeyboardInterrupt): return None
+    print("\n══════════════════════════════════════════")
+    print("        🚀  Nova CLI — First Setup")
+    print("══════════════════════════════════════════")
+    print(f"  {_SETUP_BACK_HINT} (0 on first step = cancel)\n")
 
-    if not kb_path:
-        print("   ❌ KB path cannot be empty.")
-        return None
+    step = 0
+    kb_path = None
+    p_type = None
 
-    if kb_path.rstrip().endswith("kb.json"):
-        _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
-        if _dir:
-            kb_path = _dir
+    while True:
+        if step == 0:
+            raw = _setup_basic_read(
+                "📁 KB folder path (or path to kb.json)",
+                allow_back=False,
+            )
+            if raw is None:
+                return None
+            ok, result = _parse_kb_path_input(raw)
+            if not ok:
+                print(result)
+                continue
+            kb_path = result
+            if not os.path.isdir(kb_path):
+                step = 1
+            else:
+                _commit_kb_main(kb_path)
+                step = 2
 
-    kb_path = _normalize_kb_path(kb_path)
+        elif step == 1:
+            yn = _setup_basic_read(
+                f"   '{kb_path}' doesn't exist. Create? [Y/n/0]",
+                allow_back=True,
+            )
+            if yn is None:
+                return None
+            if yn == "BACK":
+                step = 0
+                continue
+            if yn.lower() in ("", "y", "yes"):
+                if os.path.isfile(kb_path):
+                    kb_path = os.path.dirname(kb_path)
+                if kb_path:
+                    os.makedirs(kb_path, exist_ok=True)
+                _commit_kb_main(kb_path)
+                step = 2
+            else:
+                step = 0
 
-    if kb_path and (os.path.isfile(kb_path) or kb_path.rstrip().endswith("kb.json")):
-        _dir = os.path.dirname(os.path.normpath(kb_path.rstrip()))
-        if _dir:
-            kb_path = _dir
-    kb_path = (kb_path or "").rstrip().rstrip("/")
+        elif step == 2:
+            plist = list(AI_PROVIDERS.keys())
+            print("\n  Available AI providers:")
+            print(f"    0. {_SETUP_BACK_LABEL}")
+            for i, p in enumerate(plist, 1):
+                print(f"    {i}. {p}")
+            print(f"    {len(plist) + 1}. Skip (no AI)")
+            try:
+                choice = input(
+                    f"  Choose [0-{len(plist) + 1}]: "
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                return None
+            if _setup_input_is_back(choice):
+                step = 0
+                continue
+            try:
+                idx = int(choice) - 1
+            except ValueError:
+                print("   ❌ Enter a number from the list.")
+                continue
+            if idx < 0 or idx > len(plist):
+                print("   ❌ Enter a number from the list.")
+                continue
+            if idx == len(plist):
+                cfg = load_config() or {}
+                _print_summary(cfg)
+                return cfg
+            p_type = plist[idx]
+            step = 3
 
-    if not kb_path:
-        print("   ❌ KB path is empty or invalid. Please enter the folder path.")
-        return None
-    if os.path.basename(kb_path.rstrip("/")) == "kb.json":
-        print("   ❌ Please enter the folder that contains kb.json, not the file path.")
-        return None
-
-    if not os.path.isdir(kb_path):
-        yn = input(f"   '{kb_path}' doesn't exist. Create? [Y/n]: ").strip().lower()
-        if yn in ("", "y", "yes"):
-            if os.path.isfile(kb_path):
-                kb_path = os.path.dirname(kb_path)
-            if kb_path:
-                os.makedirs(kb_path, exist_ok=True)
-        else:
-            return None
-
-    _ensure_kb_file(kb_path)
-    add_kb_source("main", kb_path)
-
-    print("\n  Available AI providers:")
-    plist = list(AI_PROVIDERS.keys())
-    for i, p in enumerate(plist, 1): print(f"    {i}. {p}")
-    print(f"    {len(plist)+1}. Skip (no AI)")
-
-    try:
-        choice = input(f"  Choose [1-{len(plist)+1}]: ").strip()
-        idx = int(choice) - 1
-        if 0 <= idx < len(plist):
-            _add_provider_basic(plist[idx], set_active=True)
-    except (ValueError, IndexError, EOFError, KeyboardInterrupt): pass
-
-    cfg = load_config() or {}
-    cfg["active_kb"] = "main"
-    cfg["added_by"] = getpass.getuser()
-    save_config(cfg)
-    _print_summary(cfg)
-    return cfg
+        elif step == 3:
+            result = _add_provider_basic(p_type, set_active=True, allow_back=True)
+            if result == "BACK":
+                step = 2
+                continue
+            if result is None:
+                return None
+            cfg = load_config() or {}
+            _print_summary(cfg)
+            return cfg
 
 
 def add_provider_interactive(p_type=None):
@@ -566,20 +754,102 @@ def _add_provider_rich(q, style, p_type, set_active=False):
     return nickname
 
 
-def _add_provider_basic(p_type, set_active=False):
-    api_key = input("🔑 API key: ").strip()
-    if not api_key: return None
-    model = input(f"📦 Model ({', '.join(AI_PROVIDERS[p_type]['models'])}): ").strip()
-    endpoint = input("🌐 Endpoint: ").strip() or AI_PROVIDERS[p_type]["endpoint"]
-    existing = load_providers()
-    nickname = input(f"🏷  Nickname: ").strip() or _generate_nickname(p_type, model, existing)
+def _add_provider_basic(p_type, set_active=False, allow_back=False):
+    """Add provider via prompts. If allow_back, return None when user enters 0."""
+    models = AI_PROVIDERS[p_type]["models"]
+    default_ep = AI_PROVIDERS[p_type]["endpoint"]
+    step = 0
+    api_key = model = endpoint = nickname = None
 
-    add_provider(nickname, p_type, model, endpoint, api_key)
-    if set_active:
-        cfg = load_config() or {}
-        cfg["active_provider"] = nickname
-        save_config(cfg)
-    return nickname
+    while True:
+        if step == 0:
+            if allow_back:
+                api_key = _setup_basic_read("🔑 API key")
+                if api_key is None:
+                    return None
+                if api_key == "BACK":
+                    return "BACK"
+            else:
+                try:
+                    api_key = input("🔑 API key: ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    return None
+            if not api_key:
+                if allow_back:
+                    print("   ❌ API key cannot be empty.")
+                    continue
+                return None
+            step = 1
+
+        elif step == 1:
+            model_hint = ", ".join(models)
+            if allow_back:
+                print(f"  Models: 0 = back, then: {', '.join(f'{i+1}. {m}' for i, m in enumerate(models))}")
+                raw = _setup_basic_read(f"📦 Model")
+                if raw is None:
+                    return None
+                if raw == "BACK":
+                    step = 0
+                    continue
+                try:
+                    midx = int(raw) - 1
+                    if 0 <= midx < len(models):
+                        model = models[midx]
+                    else:
+                        model = raw
+                except ValueError:
+                    model = raw
+            else:
+                try:
+                    model = input(f"📦 Model ({model_hint}): ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    return None
+            if not model:
+                if allow_back:
+                    print("   ❌ Model cannot be empty.")
+                    continue
+                return None
+            step = 2
+
+        elif step == 2:
+            if allow_back:
+                endpoint = _setup_basic_read(f"🌐 Endpoint [{default_ep}]")
+                if endpoint is None:
+                    return None
+                if endpoint == "BACK":
+                    step = 1
+                    continue
+                endpoint = endpoint or default_ep
+            else:
+                try:
+                    endpoint = input("🌐 Endpoint: ").strip() or default_ep
+                except (EOFError, KeyboardInterrupt):
+                    return None
+            step = 3
+
+        elif step == 3:
+            existing = load_providers()
+            default_nick = _generate_nickname(p_type, model, existing)
+            if allow_back:
+                nickname = _setup_basic_read(f"🏷  Nickname [{default_nick}]")
+                if nickname is None:
+                    return None
+                if nickname == "BACK":
+                    step = 2
+                    continue
+                nickname = nickname or default_nick
+            else:
+                try:
+                    nickname = input("🏷  Nickname: ").strip() or default_nick
+                except (EOFError, KeyboardInterrupt):
+                    return None
+
+            add_provider(nickname, p_type, model, endpoint, api_key)
+            if set_active:
+                cfg = load_config() or {}
+                cfg["active_provider"] = nickname
+                save_config(cfg)
+            return nickname
 
 
 def test_provider_connection(nickname=None):
