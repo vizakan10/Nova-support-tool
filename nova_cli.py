@@ -1343,10 +1343,10 @@ def _active_env():
     print(f"  {C.ORANGE}{'─' * 52}{C.RESET}")
     print(f"  {C.ORANGE}{C.BOLD}  Active Environment{C.RESET}")
     print(f"  {C.ORANGE}{'─' * 52}{C.RESET}")
-    print(f"  {C.BOLD}  Config{C.RESET}   {C.DIM}{cfg_path}{C.RESET}")
-    print(f"  {C.BOLD}  KB File{C.RESET}   {C.DIM}{kb_display}{C.RESET}")
-    print(f"  {C.BOLD}  Secrets{C.RESET}   {C.DIM}{sec_path}{C.RESET}")
-    print(f"  {C.BOLD}  AI Host{C.RESET}   {C.DIM}{ai_display}{C.RESET}")
+    print(f"  {C.ORANGE}{C.BOLD}  Config{C.RESET}   {C.ORANGE}{cfg_path}{C.RESET}")
+    print(f"  {C.ORANGE}{C.BOLD}  KB File{C.RESET}   {C.ORANGE}{kb_display}{C.RESET}")
+    print(f"  {C.ORANGE}{C.BOLD}  Secrets{C.RESET}   {C.ORANGE}{sec_path}{C.RESET}")
+    print(f"  {C.ORANGE}{C.BOLD}  AI Host{C.RESET}   {C.ORANGE}{ai_display}{C.RESET}")
     print(f"  {C.ORANGE}{'─' * 52}{C.RESET}\n")
 
 
@@ -2003,9 +2003,9 @@ def cmd_csetup():
                     print(f"  {line}")
                 print(f"  {C.DIM}   Retry with:  nova csync -r{C.RESET}")
     if get_active_ai_config():
-        print(f"\n  {C.CYAN}Next:{C.RESET}  nova ask i want to install kairos  — Confluence → KB → AI")
+        print(f"\n  {C.ORANGE}Next:{C.RESET}  nova ask i want to install kairos  — Confluence → KB → AI")
     else:
-        print(f"\n  {C.CYAN}Next:{C.RESET}  nova add-llm  — required for AI answers in  nova ask")
+        print(f"\n  {C.ORANGE}Next:{C.RESET}  nova add-llm  — required for AI answers in  nova ask")
         print(f"  {C.DIM}Then:{C.RESET}   nova ask your question here  — no quotes needed")
     print(f"  {C.DIM}Refresh index later:{C.RESET}  nova csync -r\n")
 
@@ -2652,7 +2652,7 @@ def _print_help_command_table():
                 cat = f"{C.ORANGE}{category}{C.RESET}{' ' * pad}"
             else:
                 cat = " " * 14
-            print(f"  {cat} {C.CYAN}{cmd:<22}{C.RESET} {C.DIM}{desc}{C.RESET}")
+            print(f"  {cat} {C.ORANGE}{cmd:<22}{C.RESET} {C.DIM}{desc}{C.RESET}")
         if gi < len(_HELP_COMMAND_ROWS) - 1:
             print(_help_rule())
     print(_help_rule("═"))
@@ -2663,11 +2663,11 @@ def _print_help_footer():
     print(f"  {C.ORANGE}{C.BOLD}Quick start{C.RESET}")
     print(
         f"  {C.DIM}Errors{C.RESET}     Run a failing command, then  "
-        f"{C.CYAN}nova up{C.RESET}  {C.DIM}→ Confluence → KB → AI{C.RESET}"
+        f"{C.ORANGE}nova up{C.RESET}  {C.DIM}→ Confluence → KB → AI{C.RESET}"
     )
     print(
         f"  {C.DIM}Questions{C.RESET}  "
-        f"{C.CYAN}nova ask i want to install kairos{C.RESET}  "
+        f"{C.ORANGE}nova ask i want to install kairos{C.RESET}  "
         f"{C.DIM}(spaces OK — no quotes needed){C.RESET}"
     )
     print()
@@ -2675,12 +2675,12 @@ def _print_help_footer():
     print(
         f"  {C.ORANGE}Hooks{C.RESET}    "
         f"{C.DIM}New shell or{C.RESET}  source ~/.bashrc  "
-        f"{C.DIM}· check{C.RESET}  {C.CYAN}echo $NOVA_SESSION_DIR{C.RESET}"
+        f"{C.DIM}· check{C.RESET}  {C.ORANGE}echo $NOVA_SESSION_DIR{C.RESET}"
     )
     print(
         f"  {C.ORANGE}Updates{C.RESET}  "
         f"{C.DIM}After{C.RESET}  git pull  {C.DIM}→{C.RESET}  "
-        f"{C.CYAN}nova update --pull{C.RESET}"
+        f"{C.ORANGE}nova update --pull{C.RESET}"
     )
     print()
 
@@ -2980,8 +2980,8 @@ def _print_unknown_nova_command(raw):
     if unique:
         print(f"  {C.DIM}   Did you mean:{C.RESET}")
         for h in unique[:3]:
-            print(f"      {C.CYAN}nova {h}{C.RESET}")
-    print(f"  {C.DIM}   Run{C.RESET}  {C.CYAN}nova help{C.RESET}  {C.DIM}for all commands.{C.RESET}\n")
+            print(f"      {C.ORANGE}nova {h}{C.RESET}")
+    print(f"  {C.DIM}   Run{C.RESET}  {C.ORANGE}nova help{C.RESET}  {C.DIM}for all commands.{C.RESET}\n")
 
 
 def main():
