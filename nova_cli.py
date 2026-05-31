@@ -478,8 +478,18 @@ def _redact_for_ai(text):
     return text
 
 
-_MANUAL_PROMPT = """\
-You are helping a colleague fix a command that failed in a {shell}.
+_MANUAL_PROMPT_BRIEF = """\
+Team KB was already searched (no match). A command failed in a {shell}.
+
+{context}
+
+Reply exactly:
+Solution: <one sentence>
+Command: <shell command to fix>
+"""
+
+_MANUAL_PROMPT_DETAILED = """\
+Team KB was already searched (no match). Help fix a command that failed in a {shell}.
 
 Command:
 {command}
@@ -490,23 +500,45 @@ Error (main line):
 Full terminal output:
 {output}
 
-Respond in EXACTLY this format (no extra text):
+Reply exactly:
 Solution: <one-sentence explanation>
-Command: <exact shell command to fix it — bash/WSL unless clearly otherwise>
+Command: <exact shell command to fix — bash/WSL unless clearly otherwise>
 """
 
 
-def _build_manual_prompt(error_sig, raw, last_cmd):
-    """Build a redacted, copy-paste prompt for the user to drop into any LLM."""
-    command = _redact_for_ai(last_cmd) if last_cmd else "(unknown)"
-    error = _redact_for_ai(error_sig) if error_sig else "(see output below)"
-    output = _redact_for_ai(_truncate_for_ai(raw)) if raw else "(none)"
-    return _MANUAL_PROMPT.format(
-        shell=_shell_context_label(),
-        command=command.strip() or "(unknown)",
-        error=error.strip() or "(see output below)",
-        output=output.strip() or "(none)",
-    )
+def _manual_prompt_fields(error_sig, raw, last_cmd):
+    """Shared redacted fields for manual LLM prompts."""
+    command = (_redact_for_ai(last_cmd) if last_cmd else "").strip() or "(unknown)"
+    output = (_redact_for_ai(_truncate_for_ai(raw)) if raw else "").strip() or "(none)"
+    error = (_redact_for_ai(error_sig) if error_sig else "").strip() or "(see output below)"
+    return command, error, output
+
+
+def _build_manual_prompt(error_sig, raw, last_cmd, *, detailed=False):
+    """Build a copy-paste prompt for an external LLM (detailed for clipboard)."""
+    command, error, output = _manual_prompt_fields(error_sig, raw, last_cmd)
+    shell = _shell_context_label()
+
+    if detailed:
+        return _MANUAL_PROMPT_DETAILED.format(
+            shell=shell,
+            command=command,
+            error=error,
+            output=output,
+        )
+
+    if output and output != "(none)":
+        context = output
+        if command != "(unknown)" and command not in output[: min(len(output), 400)]:
+            context = f"$ {command}\n{output}"
+    elif command != "(unknown)" and error != "(see output below)":
+        context = f"$ {command}\n{error}"
+    elif command != "(unknown)":
+        context = f"$ {command}"
+    else:
+        context = error
+
+    return _MANUAL_PROMPT_BRIEF.format(shell=shell, context=context)
 
 
 def call_ai(error_text, ai_config):
@@ -832,35 +864,129 @@ def _print_up_fix_lines(solution, command):
         print(f"  {C.BOLD}Command:{C.RESET}  {C.CYAN}{command}{C.RESET}")
 
 
+def _clipboard_has_content():
+    """Best-effort check that Windows clipboard is non-empty (WSL)."""
+    try:
+        proc = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "(Get-Clipboard -Raw -ErrorAction SilentlyContinue).Length",
+            ],
+            capture_output=True,
+            timeout=8,
+            text=True,
+        )
+        if proc.returncode == 0:
+            return int((proc.stdout or "").strip() or 0) > 0
+    except (ValueError, FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return None  # unknown — skip verify
+
+
+def _copy_to_clipboard(text):
+    """
+    Copy text to the system clipboard.
+    Returns (success, detail) where detail names the tool or explains the failure.
+    """
+    if not (text or "").strip():
+        return False, "nothing to copy"
+
+    payload = text.encode("utf-8")
+    errors = []
+
+    def _try_copy(run_args, label):
+        try:
+            proc = subprocess.run(
+                run_args,
+                input=payload,
+                capture_output=True,
+                timeout=10,
+            )
+            if proc.returncode != 0:
+                err = proc.stderr.decode("utf-8", errors="replace").strip()
+                errors.append(
+                    f"{label} exited {proc.returncode}"
+                    + (f": {err[:80]}" if err else "")
+                )
+                return False
+            verify = _clipboard_has_content()
+            if verify is False:
+                errors.append(f"{label}: clipboard still empty")
+                return False
+            return True
+        except FileNotFoundError:
+            errors.append(f"{label}: not found")
+        except subprocess.TimeoutExpired:
+            errors.append(f"{label}: timed out")
+        except OSError as exc:
+            errors.append(f"{label}: {exc}")
+        return False
+
+    # WSL / Windows — cmd clip handles multiline better than bare clip.exe sometimes
+    if os.path.isfile("/mnt/c/Windows/System32/cmd.exe"):
+        if _try_copy(["/mnt/c/Windows/System32/cmd.exe", "/c", "clip"], "cmd clip"):
+            return True, "cmd clip"
+
+    clip_cmds = []
+    win_clip = "/mnt/c/Windows/System32/clip.exe"
+    if os.path.isfile(win_clip):
+        clip_cmds.append(win_clip)
+    clip_cmds.append("clip.exe")
+
+    for clip in clip_cmds:
+        if _try_copy([clip], os.path.basename(clip)):
+            return True, os.path.basename(clip)
+
+    for args in (["wl-copy"], ["xclip", "-selection", "clipboard"]):
+        try:
+            proc = subprocess.run(
+                args,
+                input=payload,
+                capture_output=True,
+                timeout=10,
+            )
+            if proc.returncode == 0:
+                return True, args[0]
+            errors.append(f"{args[0]} exited {proc.returncode}")
+        except FileNotFoundError:
+            errors.append(f"{args[0]}: not found")
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            errors.append(f"{args[0]}: {exc}")
+
+    if errors:
+        return False, errors[-1] if len(errors) == 1 else "; ".join(errors[:3])
+    return False, "no clipboard tool available"
+
+
+def _print_manual_prompt_full(prompt):
+    """Show the full detailed prompt in the terminal (clipboard fallback)."""
+    print()
+    print(f"  {C.CYAN}📋 Full prompt — select and copy:{C.RESET}")
+    print(f"  {C.DIM}{'─' * 44}{C.RESET}")
+    for line in prompt.splitlines():
+        print(line)
+    print(f"  {C.DIM}{'─' * 44}{C.RESET}")
+
+
 def _offer_manual_prompt(error_sig, raw, last_cmd):
     """Offer a ready-to-paste LLM prompt (with context) when no AI is available."""
-    if not _ask_yn("Want a ready-to-paste prompt with context?", default_yes=True):
+    if not _ask_yn("Copy a short prompt for your LLM?", default_yes=True):
         return
 
-    prompt = _build_manual_prompt(error_sig, raw, last_cmd)
+    prompt_full = _build_manual_prompt(error_sig, raw, last_cmd, detailed=True)
+    copied, clip_detail = _copy_to_clipboard(prompt_full)
 
     print()
-    print(f"  {C.CYAN}📋 Copy the prompt below into your LLM (ChatGPT, Claude, etc.):{C.RESET}")
-    print(f"  {C.DIM}{'─' * 44}{C.RESET}")
-    print(prompt)
-    print(f"  {C.DIM}{'─' * 44}{C.RESET}")
-
-    copied = False
-    try:
-        subprocess.run(
-            "clip.exe",
-            input=prompt.encode("utf-8"),
-            shell=True,
-            check=True,
-            stderr=subprocess.DEVNULL,
-        )
-        copied = True
-    except Exception:
-        pass
-
     if copied:
-        print(f"  {C.GREEN}📋 Prompt copied to clipboard!{C.RESET}")
-    print(f"  {C.DIM}Tip: once you have the fix, run  nova add  to save it for your team.{C.RESET}")
+        print(f"  {C.GREEN}✅ Clipboard: copied{C.RESET}  {C.DIM}({clip_detail}){C.RESET}")
+        print(f"  {C.DIM}   Paste into ChatGPT, Claude, etc.{C.RESET}")
+    else:
+        print(f"  {C.RED}❌ Clipboard: failed{C.RESET}  {C.DIM}— {clip_detail}{C.RESET}")
+        print(f"  {C.DIM}   Showing full prompt below.{C.RESET}")
+        _print_manual_prompt_full(prompt_full)
+    print(f"  {C.DIM}Tip: run  nova add  to save the fix to the team KB.{C.RESET}")
 
 
 def _print_done_footer(start_time):
@@ -1060,7 +1186,8 @@ def cmd_up(config):
 
         ai_config = get_active_ai_config()
         if not ai_config:
-            print(f"\n  {C.YELLOW}No AI provider configured.{C.RESET}")
+            print(f"\n  {C.DIM}KB searched — no match.{C.RESET}")
+            print(f"  {C.YELLOW}No AI configured.{C.RESET}")
             _offer_manual_prompt(error_sig, raw, last_cmd)
             return
 
@@ -1086,6 +1213,7 @@ def cmd_up(config):
                 else:
                     print(f"  {C.YELLOW}⚠  {res}{C.RESET}")
             return
+        print(f"  {C.DIM}KB searched — no match.{C.RESET}")
         print(f"  {C.YELLOW}⚠  AI couldn't provide a solution.{C.RESET}")
         _offer_manual_prompt(error_sig, raw, last_cmd)
     finally:
