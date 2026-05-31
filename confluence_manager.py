@@ -177,14 +177,29 @@ def _page_id(page):
 
 
 def _page_url(domain, page):
+    """Build a browser URL from Confluence _links (page, folder, database, etc.)."""
     links = page.get("_links") or {}
-    webui = links.get("webui") or ""
+    webui = (links.get("webui") or "").strip()
+    tinyui = (links.get("tinyui") or "").strip()
+    base = (links.get("base") or "").strip().rstrip("/")
+
+    if webui.startswith("http://") or webui.startswith("https://"):
+        return webui
     if webui:
         if webui.startswith("/"):
             return f"https://{domain}/wiki{webui}"
         return f"https://{domain}/wiki/{webui}"
+    if tinyui:
+        if tinyui.startswith("/"):
+            return f"https://{domain}/wiki{tinyui}"
+        return f"https://{domain}/wiki/{tinyui}"
+    if base and page.get("id"):
+        return f"{base}/pages/viewpage.action?pageId={page.get('id')}"
+
     page_id = page.get("id", "")
-    return f"https://{domain}/wiki/pages/{page_id}"
+    if page_id:
+        return f"https://{domain}/wiki/pages/viewpage.action?pageId={page_id}"
+    return (page.get("url") or "").strip()
 
 
 def _last_updated(page):
@@ -516,18 +531,20 @@ def _hydrate_from_local_picks(domain, email, token, picks, query, priority_space
             if page:
                 item = _hit_to_result(domain, page, words, priority_spaces)
                 item["score"] = max(item.get("score", 0), pick.get("score", 0))
+                if not (item.get("url") or "").strip() and pick.get("url"):
+                    item["url"] = pick["url"]
                 out.append(item)
                 continue
         item = {
             "id": pid,
             "title": pick.get("title") or "Untitled",
-            "url": pick.get("url") or "",
+            "url": pick.get("url") or _page_url(domain, {"id": pid}),
             "excerpt": _excerpt(pick.get("summary") or "", words),
             "space_key": pick.get("space_key") or "",
             "score": pick.get("score", 0),
         }
         out.append(item)
-    return _finalize_results(out, priority_spaces, words)
+    return _finalize_results(out, priority_spaces, words, domain=domain)
 
 
 def _api_hits_to_ranked(domain, hits, query, priority_spaces):
@@ -555,7 +572,19 @@ def _dedupe_by_id(hits):
     return out
 
 
-def _finalize_results(items, priority_spaces, words):
+def _ensure_result_urls(domain, items):
+    """Fill missing URLs from page id so nova ask can print links."""
+    domain = _normalize_domain(domain)
+    for item in items:
+        if (item.get("url") or "").strip():
+            continue
+        pid = item.get("id")
+        if pid:
+            item["url"] = f"https://{domain}/wiki/pages/viewpage.action?pageId={pid}"
+    return items
+
+
+def _finalize_results(items, priority_spaces, words, domain=None):
     """Re-rank, drop internal scores, return top N."""
     for item in items:
         if "score" not in item or not item["score"]:
@@ -564,6 +593,8 @@ def _finalize_results(items, priority_spaces, words):
     top = items[:_SEARCH_TOP_N]
     for item in top:
         item.pop("score", None)
+    if domain:
+        _ensure_result_urls(domain, top)
     return top
 
 
@@ -576,12 +607,12 @@ def search_confluence_rest(domain, email, token, query, top_n=None, priority_spa
     stage1 = _search_cql(domain, email, token, query, space_keys=priority_spaces, limit=10)
     if len(stage1) >= _STAGE1_MIN_RESULTS:
         ranked = _api_hits_to_ranked(domain, stage1, query, priority_spaces)
-        return _finalize_results(ranked, priority_spaces, words)[:top_n]
+        return _finalize_results(ranked, priority_spaces, words, domain=domain)[:top_n]
 
     stage2 = _search_cql(domain, email, token, query, space_keys=None, limit=10)
     combined = _dedupe_by_id(stage1 + stage2)
     ranked = _api_hits_to_ranked(domain, combined, query, priority_spaces)
-    return _finalize_results(ranked, priority_spaces, words)[:top_n]
+    return _finalize_results(ranked, priority_spaces, words, domain=domain)[:top_n]
 
 
 def search_confluence_local(query, top_n=3):
@@ -590,7 +621,8 @@ def search_confluence_local(query, top_n=3):
     priority = cfg.get("priority_spaces") if cfg else DEFAULT_PRIORITY_SPACES
     ranked = _search_local_index_ranked(query, priority, top_n=top_n or _SEARCH_TOP_N)
     words = _query_words(query)
-    return _finalize_results(ranked, priority, words)
+    dom = (cfg or {}).get("domain") or DEFAULT_DOMAIN
+    return _finalize_results(ranked, priority, words, domain=dom)
 
 
 def search_confluence(query, top_n=None, domain=None, email=None, token=None):
@@ -620,17 +652,18 @@ def search_confluence(query, top_n=None, domain=None, email=None, token=None):
             domain, email, token, local_ranked[:top_n], query, priority_spaces
         )
         if hydrated:
+            _ensure_result_urls(domain, hydrated)
             return hydrated
 
     stage1 = _search_cql(domain, email, token, query, space_keys=priority_spaces, limit=10)
     if len(stage1) >= _STAGE1_MIN_RESULTS:
         ranked = _api_hits_to_ranked(domain, stage1, query, priority_spaces)
-        return _finalize_results(ranked, priority_spaces, words)[:top_n]
+        return _finalize_results(ranked, priority_spaces, words, domain=domain)[:top_n]
 
     stage2 = _search_cql(domain, email, token, query, space_keys=None, limit=10)
     combined = _dedupe_by_id(stage1 + stage2)
     ranked = _api_hits_to_ranked(domain, combined, query, priority_spaces)
-    return _finalize_results(ranked, priority_spaces, words)[:top_n]
+    return _finalize_results(ranked, priority_spaces, words, domain=domain)[:top_n]
 
 
 def format_confluence_context(results):

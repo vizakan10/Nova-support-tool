@@ -1855,7 +1855,15 @@ def cmd_ask(config, query=None):
                 for hit in confluence_results:
                     sk = hit.get("space_key") or "?"
                     title = hit.get("title") or "Untitled"
+                    url = (hit.get("url") or "").strip()
                     print(f"     {C.BOLD}•{C.RESET} [{sk}] {title}")
+                    if url:
+                        print(f"       {C.CYAN}{url}{C.RESET}")
+                    elif hit.get("id"):
+                        cfg = load_confluence_config() or {}
+                        dom = cfg.get("domain") or DEFAULT_DOMAIN
+                        fallback = f"https://{dom}/wiki/pages/viewpage.action?pageId={hit['id']}"
+                        print(f"       {C.CYAN}{fallback}{C.RESET}")
                 print()
 
         if not ai_config:
