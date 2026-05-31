@@ -942,7 +942,7 @@ def _print_ask_answer(text):
     print()
 
 
-UP_PIPELINE_ORDER = ("KB", "Confluence", "AI")
+UP_PIPELINE_ORDER = ("Confluence", "KB", "AI")
 ASK_PIPELINE_ORDER = ("Confluence", "KB", "AI")
 _PIPELINE_LABELS = {
     "off": "not set up",
@@ -958,7 +958,7 @@ def _fresh_pipeline(order):
 
 
 def _print_pipeline_trail(trail, *, label="Pipeline"):
-    """Show which sources were checked (nova up: KB→Confluence→AI, ask: Confluence→KB→AI)."""
+    """Show which sources were checked (nova up / ask: Confluence→KB→AI)."""
     if not trail:
         return
     parts = [
@@ -1381,7 +1381,7 @@ def _run_command(command):
 # ── nova up ──────────────────────────────────────────────────────────────────
 
 def cmd_up(config):
-    """nova up — Error Intercept: KB → Confluence → AI."""
+    """nova up — Error Intercept: Confluence → KB → AI (same order as nova ask)."""
     t0 = time.monotonic()
     pipeline = _fresh_pipeline(UP_PIPELINE_ORDER)
     show_trail = False
@@ -1424,34 +1424,15 @@ def cmd_up(config):
 
         _print_up_header(last_cmd)
         show_trail = True
-        print(f"  {C.CYAN}🔍 Scanning KB → Confluence → AI...{C.RESET}")
+        print(f"  {C.CYAN}🔍 Scanning Confluence → KB → AI...{C.RESET}")
+        print(f"  {C.DIM}Order: Confluence → KB → AI{C.RESET}")
 
-        with _Spinner("Searching KB..."):
-            merged = resolve_conflicts(kb_path)
-            error_sig = detect_error(raw) or raw.strip()[:250]
-            kb_data = load_kb(kb_path)
-            results = fuzzy_search(error_sig, kb_data, threshold=70)
-
+        merged = resolve_conflicts(kb_path)
+        error_sig = detect_error(raw) or raw.strip()[:250]
         if merged:
             print(f"  {C.DIM}Merged {merged} OneDrive conflict entries.{C.RESET}")
 
-        if results:
-            pipeline["KB"] = "used"
-            pipeline["Confluence"] = "skip"
-            pipeline["AI"] = "skip"
-            print(f"  {C.GREEN}⚡ Found in KB{C.RESET}")
-            best_entry, _best_score = results[0]
-            cmd = _print_up_kb_hit(best_entry)
-            _run_command_up(cmd)
-            if len(results) > 1:
-                print(f"\n  {C.DIM}Other matches:{C.RESET}")
-                for entry, sc in results[1:3]:
-                    print(f"  {C.DIM}  • ({sc}%) {entry.get('error', '')[:60]}{C.RESET}")
-            return
-
-        pipeline["KB"] = "miss"
-        print(f"  {C.DIM}KB — no match.{C.RESET}")
-
+        # 1. Confluence (same order as nova ask)
         ai_pages = []
         use_confluence = False
         if confluence_index_exists():
@@ -1479,6 +1460,29 @@ def cmd_up(config):
         else:
             pipeline["Confluence"] = "off"
             print(f"  {C.DIM}Confluence — not configured (nova csetup).{C.RESET}")
+
+        # 2. KB
+        with _Spinner("Searching KB..."):
+            kb_data = load_kb(kb_path)
+            results = fuzzy_search(error_sig, kb_data, threshold=70)
+
+        if results:
+            pipeline["KB"] = "used"
+            pipeline["AI"] = "skip"
+            print(f"  {C.GREEN}⚡ Found in KB{C.RESET}")
+            best_entry, _best_score = results[0]
+            cmd = _print_up_kb_hit(best_entry)
+            _run_command_up(cmd)
+            if len(results) > 1:
+                print(f"\n  {C.DIM}Other matches:{C.RESET}")
+                for entry, sc in results[1:3]:
+                    print(f"  {C.DIM}  • ({sc}%) {entry.get('error', '')[:60]}{C.RESET}")
+            return
+
+        pipeline["KB"] = "miss"
+        print(f"  {C.DIM}KB — no match.{C.RESET}")
+
+        # 3. AI
 
         ai_config = get_active_ai_config()
         if not ai_config:
@@ -1999,10 +2003,10 @@ def cmd_csetup():
                     print(f"  {line}")
                 print(f"  {C.DIM}   Retry with:  nova csync -r{C.RESET}")
     if get_active_ai_config():
-        print(f"\n  {C.CYAN}Next:{C.RESET}  nova ask \"your question\"  — Confluence → KB → AI")
+        print(f"\n  {C.CYAN}Next:{C.RESET}  nova ask i want to install kairos  — Confluence → KB → AI")
     else:
         print(f"\n  {C.CYAN}Next:{C.RESET}  nova add-llm  — required for AI answers in  nova ask")
-        print(f"  {C.DIM}Then:{C.RESET}   nova ask \"your question\"  — Confluence → KB → AI")
+        print(f"  {C.DIM}Then:{C.RESET}   nova ask your question here  — no quotes needed")
     print(f"  {C.DIM}Refresh index later:{C.RESET}  nova csync -r\n")
 
 
@@ -2189,12 +2193,16 @@ def _ask_user_pick_confluence_page(ranked):
 
 
 def cmd_ask(config, query=None):
-    """nova ask — Confluence → KB → AI."""
+    """nova ask — Confluence → KB → AI. Pass words after ask; quotes optional."""
     t0 = time.monotonic()
     pipeline = _fresh_pipeline(ASK_PIPELINE_ORDER)
     show_trail = False
     try:
         if not query or not query.strip():
+            print(
+                f"  {C.DIM}Type your question after the command — "
+                f"e.g.  nova ask i want to install kairos{C.RESET}"
+            )
             try:
                 query = input(f"  {C.BOLD}Your question:{C.RESET} ").strip()
             except (EOFError, KeyboardInterrupt):
@@ -2371,7 +2379,7 @@ def cmd_search(config, query=None):
         print(f"  {C.YELLOW}⚠  No query.{C.RESET}")
         return
 
-    print(f"\n  {C.ORANGE}{C.BOLD}🔍 \"{query}\"{C.RESET}\n")
+    print(f"\n  {C.ORANGE}{C.BOLD}🔍 {query}{C.RESET}\n")
 
     resolve_conflicts(kb_path)
     data, kb_err = load_kb_for_write(kb_path)
@@ -2583,7 +2591,7 @@ def _print_nova_commands_quick_ref():
         ("Support", (
             "nova up",
             "nova search [q]",
-            "nova ask  ·  nova -a [q]",
+            "nova ask  ·  nova -a  (words, no quotes)",
         )),
         ("Knowledge", (
             "nova add",
@@ -2622,9 +2630,9 @@ def cmd_help():
     sep = f"  {C.ORANGE}{'─' * 78}{C.RESET}"
     print(f"  {C.BOLD}{'Category':<12} {'Command':<24} {'Description':<38}{C.RESET}")
     print(sep)
-    print(f"  {'Support':<12} {'nova up':<24} {'Last error: KB → Confluence → AI.':<38}")
-    print(f"  {'':<12} {'nova search [q]':<24} {'KB first, then AI.':<38}")
-    print(f"  {'':<12} {'nova ask / -a [q]':<24} {'Confluence → KB → AI answer.':<38}")
+    print(f"  {'Support':<12} {'nova up':<24} {'Last error: Confluence → KB → AI.':<38}")
+    print(f"  {'':<12} {'nova search words...':<24} {'KB first, then AI (no quotes).':<38}")
+    print(f"  {'':<12} {'nova ask / -a words...':<24} {'Ask anything (no quotes needed).':<38}")
     print(sep)
     print(f"  {'Knowledge':<12} {'nova add':<24} {'Add one error/solution to KB.':<38}")
     print(f"  {'':<12} {'nova kb list':<24} {'List KB entries (with ID).':<38}")
@@ -2654,7 +2662,7 @@ def cmd_help():
     print(f"  {'':<12} {'nova fresh / help':<24} {'Reset all / this guide.':<38}")
     print(sep)
     print(
-        f"  {C.ORANGE}  Workflow{C.RESET}  Fail a command →  nova up  → KB → Confluence → AI.  "
+        f"  {C.ORANGE}  Workflow{C.RESET}  Fail a command →  nova up  → Confluence → KB → AI.  "
         f"Questions →  nova ask  → Confluence → KB → AI"
     )
     print(
@@ -3112,6 +3120,7 @@ def main():
         query = " ".join(args[1:]).strip() if len(args) > 1 else None
         cmd_search(config, query)
     elif command in ("ask", "-a"):
+        # All words after ask/-a become the question — no quotes required
         query = " ".join(args[1:]).strip() if len(args) > 1 else None
         cmd_ask(config, query)
     else:

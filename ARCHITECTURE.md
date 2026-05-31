@@ -16,14 +16,16 @@ File: `~/.nova/confluence_index.json`
 
 Built by `build_confluence_index()` / refreshed by `nova csync -r`.
 
-## `nova up` flow (KB → Confluence → AI)
+## `nova up` flow (Confluence → KB → AI)
+
+Same order as `nova ask`.
 
 1. Capture last terminal error (hooks)
-2. **KB** — fuzzy search; strong match → show fix and **stop** (Confluence/AI skipped)
-3. **Confluence** — local BM25 search on error text; strong match → pages go to AI
+2. **Confluence** — local BM25 search on error text; strong match → pages go to AI
+3. **KB** — fuzzy search; strong match → show fix and **stop**
 4. **AI** — Confluence+error prompt, else error-only; optional save to KB
 
-Footer: `Pipeline: KB (…) → Confluence (…) → AI (…)`
+Footer: `Pipeline: Confluence (…) → KB (…) → AI (…)`
 
 ## `nova ask` flow (Confluence → KB → AI)
 
@@ -54,7 +56,7 @@ Displayed `score` is a combined value (BM25×100 + heuristics + phrase). Not com
 | `nova csetup` | Credentials + optional NGA full scan |
 | `nova csync -r` | Rescan NGA, show +new / ~updated |
 | `nova ask` | Confluence → KB → AI |
-| `nova up` | KB → Confluence → AI |
+| `nova up` | Confluence → KB → AI |
 
 ## Tests
 

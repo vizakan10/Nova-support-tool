@@ -14,7 +14,8 @@ import nova_cli as nc
 
 class PipelineOrderTestCase(unittest.TestCase):
     def test_up_pipeline_order(self):
-        self.assertEqual(nc.UP_PIPELINE_ORDER, ("KB", "Confluence", "AI"))
+        self.assertEqual(nc.UP_PIPELINE_ORDER, ("Confluence", "KB", "AI"))
+        self.assertEqual(nc.UP_PIPELINE_ORDER, nc.ASK_PIPELINE_ORDER)
 
     def test_ask_pipeline_order(self):
         self.assertEqual(nc.ASK_PIPELINE_ORDER, ("Confluence", "KB", "AI"))
