@@ -1728,7 +1728,11 @@ def cmd_csetup():
     print(f"\n  {C.GREEN}✓ Saved Confluence credentials.{C.RESET}")
     print(f"  {C.DIM}Domain:{C.RESET} {domain}")
     print(f"  {C.DIM}Email:{C.RESET}  {email}")
-    print(f"\n  {C.CYAN}Next:{C.RESET}  nova ask \"your question\"  — live Confluence search + AI")
+    if get_active_ai_config():
+        print(f"\n  {C.CYAN}Next:{C.RESET}  nova ask \"your question\"  — Confluence search + AI answer")
+    else:
+        print(f"\n  {C.CYAN}Next:{C.RESET}  nova add-llm  — required for AI answers in  nova ask")
+        print(f"  {C.DIM}Then:{C.RESET}   nova ask \"your question\"  — Confluence search + AI")
     print(f"  {C.DIM}Optional:{C.RESET}  nova csync  — download pages to ~/.nova/confluence_index.json\n")
 
 
@@ -1777,10 +1781,6 @@ def cmd_ask(config, query=None):
     """nova ask [question] / nova -a [question] — Confluence search + AI answer."""
     t0 = time.monotonic()
     try:
-        ai_config = get_active_ai_config()
-        if not ai_config:
-            print(f"  {C.RED}❌ No AI provider configured. Run:  nova add-llm{C.RESET}")
-            return
         if not query or not query.strip():
             try:
                 query = input(f"  {C.BOLD}Your question:{C.RESET} ").strip()
@@ -1789,6 +1789,18 @@ def cmd_ask(config, query=None):
         if not query:
             print(f"  {C.YELLOW}⚠  No question entered.{C.RESET}")
             return
+
+        ai_config = get_active_ai_config()
+        if not ai_config:
+            if confluence_credentials_ready():
+                print(
+                    f"\n  {C.YELLOW}⚠  AI not configured — skipping AI, checking Confluence only.{C.RESET}"
+                )
+                print(f"  {C.DIM}   Add AI later:  nova add-llm{C.RESET}")
+            else:
+                print(f"  {C.RED}❌ AI not configured. Run:  nova add-llm{C.RESET}")
+                print(f"  {C.DIM}   For company docs first:  nova csetup{C.RESET}\n")
+                return
 
         confluence_results = []
         if confluence_credentials_ready():
@@ -1803,8 +1815,22 @@ def cmd_ask(config, query=None):
                 print(f"\n  {C.GREEN}📄 Found {n} page{'s' if n != 1 else ''}:{C.RESET}")
                 for hit in confluence_results:
                     title = hit.get("title") or "Untitled"
-                    print(f"     {C.BOLD}•{C.RESET} {title}")
+                    url = hit.get("url") or ""
+                    if url:
+                        print(f"     {C.BOLD}•{C.RESET} {title}")
+                        print(f"       {C.DIM}{url}{C.RESET}")
+                    else:
+                        print(f"     {C.BOLD}•{C.RESET} {title}")
                 print()
+
+        if not ai_config:
+            if confluence_results:
+                print(
+                    f"  {C.DIM}   Re-run  nova ask  after  nova add-llm  for an AI summary.{C.RESET}\n"
+                )
+            else:
+                print(f"  {C.YELLOW}⚠  No matching Confluence pages.{C.RESET}\n")
+            return
 
         if confluence_results:
             excerpts = format_confluence_context(confluence_results)
