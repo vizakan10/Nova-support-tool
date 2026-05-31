@@ -20,6 +20,11 @@ KBS_FILE = os.path.join(CONFIG_DIR, "kb_sources.json")
 # in front of LLM APIs (e.g. Cloudflare 1010 / "browser signature").
 NOVA_HTTP_USER_AGENT = "Nova-CLI/2.0.0"
 
+# ─── API key / token URLs (shown during setup) ───────────────────────────────
+ATLASSIAN_API_TOKEN_URL = (
+    "https://id.atlassian.com/manage-profile/security/api-tokens"
+)
+
 # ─── AI Provider Defaults ────────────────────────────────────────────────────
 AI_PROVIDERS = {
     "groq": {
@@ -30,11 +35,14 @@ AI_PROVIDERS = {
             "mixtral-8x7b-32768",
             "Other",
         ],
+        "key_url": "https://console.groq.com/keys",
+        "key_hint": "Free tier — create an API key in Groq Console",
     },
     "openai": {
         "endpoint": "https://api.openai.com/v1/chat/completions",
         "models": ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo", "Other"],
-        
+        "key_url": "https://platform.openai.com/api-keys",
+        "key_hint": "Requires an OpenAI account with billing or credits",
     },
     "claude": {
         "endpoint": "https://api.anthropic.com/v1/messages",
@@ -43,21 +51,47 @@ AI_PROVIDERS = {
             "claude-3-opus-20240229",
             "Other",
         ],
+        "key_url": "https://console.anthropic.com/settings/keys",
+        "key_hint": "Anthropic API key (Claude)",
     },
     "deepseek": {
         "endpoint": "https://api.deepseek.com/v1/chat/completions",
         "models": ["deepseek-chat", "deepseek-coder", "Other"],
+        "key_url": "https://platform.deepseek.com/api_keys",
+        "key_hint": "DeepSeek platform API key",
     },
     "ollama": {
         "endpoint": "http://localhost:11434/v1/chat/completions",
         "models": ["llama3", "mistral", "codellama", "Other"],
-        
+        "key_url": "https://ollama.com/download",
+        "key_hint": "Local only — install Ollama; use any placeholder for API key",
     },
     "google": {
         "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
         "models": ["gemini-2.0-flash", "gemini-1.5-pro", "Other"],
+        "key_url": "https://aistudio.google.com/apikey",
+        "key_hint": "Google AI Studio API key (Gemini)",
     },
 }
+
+
+def get_provider_key_url(provider_type):
+    """URL where the user can create an API key for *provider_type*."""
+    info = AI_PROVIDERS.get(provider_type) or {}
+    return (info.get("key_url") or "").strip()
+
+
+def print_provider_key_help(provider_type, *, prefix="  "):
+    """Print where to get an API key before prompting."""
+    info = AI_PROVIDERS.get(provider_type) or {}
+    url = (info.get("key_url") or "").strip()
+    hint = (info.get("key_hint") or "").strip()
+    if url:
+        print(f"{prefix}Get API key: {url}")
+    if hint:
+        print(f"{prefix}{hint}")
+    if url or hint:
+        print()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -560,6 +594,7 @@ def _setup_rich(q):
             step = 3
 
         elif step == 3:
+            print_provider_key_help(p_type)
             api_key = q.password(
                 "🔑 API key:",
                 instruction=_SETUP_BACK_HINT,
@@ -695,7 +730,11 @@ def _setup_basic():
             print("\n  Available AI providers:")
             print(f"    0. {_SETUP_BACK_LABEL}")
             for i, p in enumerate(plist, 1):
-                print(f"    {i}. {p}")
+                url = get_provider_key_url(p)
+                if url:
+                    print(f"    {i}. {p}  →  {url}")
+                else:
+                    print(f"    {i}. {p}")
             print(f"    {len(plist) + 1}. Skip (no AI)")
             try:
                 choice = input(
@@ -745,7 +784,12 @@ def add_provider_interactive(p_type=None):
     except ImportError:
         if p_type is None:
             plist = list(AI_PROVIDERS.keys())
-            for i, p in enumerate(plist, 1): print(f"    {i}. {p}")
+            for i, p in enumerate(plist, 1):
+                url = get_provider_key_url(p)
+                if url:
+                    print(f"    {i}. {p}  →  {url}")
+                else:
+                    print(f"    {i}. {p}")
             try:
                 c = int(input(f"  Choose [1-{len(plist)}]: ").strip()) - 1
                 p_type = plist[c]
@@ -754,6 +798,7 @@ def add_provider_interactive(p_type=None):
 
 
 def _add_provider_rich(q, style, p_type, set_active=False):
+    print_provider_key_help(p_type)
     api_key = q.password("🔑 API key:", style=style).ask()
     if not api_key: return None
     
@@ -783,6 +828,7 @@ def _add_provider_basic(p_type, set_active=False, allow_back=False):
 
     while True:
         if step == 0:
+            print_provider_key_help(p_type)
             if allow_back:
                 api_key = _setup_basic_read("🔑 API key")
                 if api_key is None:

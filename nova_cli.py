@@ -19,6 +19,16 @@ from datetime import datetime
 
 VERSION = "2.0.0"
 
+
+def get_bundled_file(filename):
+    """Path to a file shipped with Nova (PyInstaller bundle or repo checkout)."""
+    if getattr(sys, "frozen", False):
+        base = sys._MEIPASS
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, filename)
+
+
 # Fetched on first run each day; you can publish announcements by updating this file in the repo
 ANNOUNCEMENTS_URL = "https://raw.githubusercontent.com/vizakan10/Nova-support-tool/main/announcements.json"
 ANNOUNCE_STATE_FILE = os.path.join(os.path.expanduser("~/.nova"), "announce_state.json")
@@ -52,7 +62,10 @@ from config import (
     reset_all_config,
     CONFIG_FILE,
     AI_PROVIDERS,
+    ATLASSIAN_API_TOKEN_URL,
     NOVA_HTTP_USER_AGENT,
+    get_provider_key_url,
+    print_provider_key_help,
 )
 from kb_manager import (
     fuzzy_search,
@@ -1849,11 +1862,10 @@ def _find_nova_repo_root():
 
 
 def _find_nova_shell_asset(filename):
-    """Locate a Nova shell asset from repo, editable install, or pip data_files."""
-    here = os.path.dirname(os.path.abspath(__file__))
+    """Locate a Nova shell asset (bundled binary, repo, editable install, or pip data_files)."""
     repo = _find_nova_repo_root()
     candidates = [
-        os.path.join(here, filename),
+        get_bundled_file(filename),
         os.path.join(repo, filename) if repo else "",
         os.path.join(sys.prefix, "share", "nova-cli", filename),
         os.path.join(os.path.expanduser("~/.local"), "share", "nova-cli", filename),
@@ -1937,9 +1949,9 @@ def cmd_csetup():
     """nova csetup — Save Atlassian domain, email, and Jira API token for Confluence search."""
     print(f"\n  {C.ORANGE}{C.BOLD}Confluence setup{C.RESET}")
     print(
-        f"  {C.DIM}Confluence REST API — use a classic API token (no scopes) from id.atlassian.com, "
-        f"same email you use in the browser.{C.RESET}\n"
+        f"  {C.DIM}Classic API token (no scopes) — same email you use in the browser.{C.RESET}"
     )
+    print(f"  {C.ORANGE}Get token:{C.RESET}  {ATLASSIAN_API_TOKEN_URL}\n")
     try:
         domain_in = input(
             f"  {C.BOLD}Atlassian domain{C.RESET} [{DEFAULT_DOMAIN}]: "
@@ -2506,6 +2518,14 @@ def cmd_model(model=None):
 
 def cmd_apikey(key=None):
     """nova apikey [k] — Securely save the active provider's API key."""
+    cfg = load_config() or {}
+    active = cfg.get("active_provider", "")
+    providers = load_providers()
+    if active and active in providers:
+        p_type = providers[active].get("provider", "")
+        if p_type:
+            print()
+            print_provider_key_help(p_type)
     if key and key.strip():
         if set_active_provider_apikey(key.strip()):
             print(f"  {C.GREEN}✅ API key updated for active provider.{C.RESET}")

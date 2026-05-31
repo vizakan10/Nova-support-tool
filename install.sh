@@ -2,12 +2,24 @@
 sed -i 's/\r//' "$0" 2>/dev/null || sed -i '' 's/\r//' "$0" 2>/dev/null || true
 # Nova CLI — one-shot installer (no chmod needed)
 #
-#   curl -fsSL https://raw.githubusercontent.com/vizakan10/Nova-support-tool/main/install.sh | bash
+# Option 1 — Binary install (recommended, no Python required):
+#   mkdir -p ~/.local/bin
+#   curl -L https://github.com/vizakan10/Nova-support-tool/releases/latest/download/nova -o ~/.local/bin/nova
+#   chmod +x ~/.local/bin/nova
+#   export PATH="$HOME/.local/bin:$PATH"
+#   nova install-hooks
+#   nova setup
 #
+# Option 2 — Source install (developers):
+#   curl -fsSL https://raw.githubusercontent.com/vizakan10/Nova-support-tool/main/install.sh | bash
 #   git clone https://github.com/vizakan10/Nova-support-tool.git
 #   cd Nova-support-tool && bash install.sh
+#
+#   bash install.sh --binary   # download release binary instead of pip install
 
 set -euo pipefail
+
+NOVA_RELEASE_URL="https://github.com/vizakan10/Nova-support-tool/releases/latest/download/nova"
 
 REPO_URL="https://github.com/vizakan10/Nova-support-tool.git"
 REPO_DIR="${NOVA_SRC:-$HOME/.nova/nova-src}"
@@ -41,6 +53,24 @@ _in_repo() {
     [[ -f "${1}/setup.py" && -f "${1}/nova_cli.py" ]]
 }
 
+_nova_already_configured() {
+    python3 - <<'PY' 2>/dev/null
+import json
+import os
+import sys
+
+path = os.path.expanduser("~/.nova/config.json")
+if not os.path.isfile(path):
+    sys.exit(1)
+try:
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except (json.JSONDecodeError, OSError):
+    sys.exit(1)
+sys.exit(0 if cfg.get("active_kb") else 1)
+PY
+}
+
 # curl | bash: clone source and re-exec the on-disk install.sh
 if [[ "${BASH_SOURCE[0]:-}" == "bash" ]] || [[ ! -f "${BASH_SOURCE[0]:-}" ]]; then
     echo "▶ Fetching Nova source..."
@@ -61,13 +91,58 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+_install_binary() {
+    echo "╔══════════════════════════════════════════╗"
+    echo "║     🚀  Nova CLI Installer (binary)      ║"
+    echo "╚══════════════════════════════════════════╝"
+    echo ""
+    if [[ ":${PATH}:" != *":${LOCAL_BIN}:"* ]]; then
+        if [[ -f "$BASHRC" ]] && ! grep -qF 'Nova CLI Path' "$BASHRC" 2>/dev/null; then
+            {
+                echo ""
+                echo "# Nova CLI Path"
+                echo 'export PATH="$HOME/.local/bin:$PATH"'
+            } >>"$BASHRC" || true
+        fi
+    fi
+    export PATH="${LOCAL_BIN}:${PATH}"
+    echo "▶ Downloading nova binary..."
+    mkdir -p "$LOCAL_BIN"
+    if ! curl -fsSL "$NOVA_RELEASE_URL" -o "$LOCAL_BIN/nova"; then
+        die "Download failed. Check network or build from source: bash install.sh"
+    fi
+    chmod +x "$LOCAL_BIN/nova"
+    step_ok "Installed to $LOCAL_BIN/nova"
+    export PATH="${LOCAL_BIN}:${PATH}"
+    echo "▶ Installing shell hooks..."
+    nova install-hooks || die "nova install-hooks failed"
+    step_ok "Hooks installed"
+    if ! _nova_already_configured; then
+        echo ""
+        echo "▶ Running Nova setup (KB path + AI provider)..."
+        nova setup || die "nova setup failed"
+        step_ok "Setup complete"
+    fi
+    echo ""
+    echo " ✓ Nova binary installed successfully"
+    echo "  Open a new terminal or: source ~/.bashrc"
+    echo ""
+}
+
+if [[ "${1:-}" == "--binary" ]]; then
+    _install_binary
+    exit 0
+fi
+
 if ! _in_repo "$SCRIPT_DIR"; then
-    die "Not a Nova repo (missing setup.py). Run from a clone or use curl | bash."
+    die "Not a Nova repo (missing setup.py). Run from a clone, curl | bash, or: bash install.sh --binary"
 fi
 
 echo "╔══════════════════════════════════════════╗"
 echo "║          🚀  Nova CLI Installer          ║"
 echo "╚══════════════════════════════════════════╝"
+echo ""
+echo "  Tip: release binary (no Python):  bash install.sh --binary"
 echo ""
 
 # ── 1. Strip CRLF from all repo shell scripts ───────────────────────────────
@@ -139,24 +214,6 @@ else
 fi
 
 # ── 7. Interactive setup (KB + AI) — first install only ─────────────────────
-_nova_already_configured() {
-    python3 - <<'PY' 2>/dev/null
-import json
-import os
-import sys
-
-path = os.path.expanduser("~/.nova/config.json")
-if not os.path.isfile(path):
-    sys.exit(1)
-try:
-    with open(path, encoding="utf-8") as fh:
-        cfg = json.load(fh)
-except (json.JSONDecodeError, OSError):
-    sys.exit(1)
-sys.exit(0 if cfg.get("active_kb") else 1)
-PY
-}
-
 echo ""
 if _nova_already_configured; then
     step_ok "Existing ~/.nova config found — setup skipped"
@@ -184,6 +241,7 @@ if ! _confluence_configured; then
     read -r -p "Connect Confluence for company knowledge search? [y/N]: " connect_cf
     if [[ "${connect_cf:-}" =~ ^[Yy]$ ]]; then
         echo ""
+        echo "  Atlassian API token: https://id.atlassian.com/manage-profile/security/api-tokens"
         if nova csetup; then
             step_ok "Confluence credentials saved"
             echo ""

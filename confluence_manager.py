@@ -242,7 +242,8 @@ def format_confluence_api_error(status_code, body, domain=None, email=None):
         return (
             "Confluence authentication failed (401).\n"
             "  • Check email matches the account that created the API token\n"
-            "  • Create a new token at https://id.atlassian.com and run  nova csetup"
+            "  • Create a new token at https://id.atlassian.com/manage-profile/security/api-tokens "
+            "and run  nova csetup"
         )
     if status_code == 404:
         return f"Confluence API not found (404). Check domain is correct: {domain}"
