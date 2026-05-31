@@ -187,6 +187,10 @@ def ensure_local_index(interactive=True):
         return False
     if ans not in ("", "y", "yes"):
         return False
+    ok, err = verify_confluence_access(cfg["domain"], cfg["email"], token)
+    if not ok:
+        print(f"\n  ⚠ Cannot build index:\n  {err}\n")
+        return False
     print(f"\n  ▶ Building local RAG index ({DEFAULT_INDEX_SPACE})...\n")
     try:
         build_confluence_index(
@@ -194,13 +198,75 @@ def ensure_local_index(interactive=True):
         )
         return confluence_index_exists()
     except (ValueError, RuntimeError) as exc:
-        print(f"  ⚠ Index build failed: {exc}")
+        print(f"  ⚠ Index build failed:\n  {exc}\n")
         return False
 
 
 def _auth_header(email, token):
+    """RFC 7617 Basic auth value for Confluence REST (email:api_token)."""
     raw = f"{email}:{token}".encode("utf-8")
-    return base64.b64encode(raw).decode("ascii")
+    encoded = base64.b64encode(raw).decode("ascii")
+    return f"Basic {encoded}"
+
+
+def format_confluence_api_error(status_code, body, domain=None, email=None):
+    """Turn Confluence HTTP errors into actionable messages."""
+    domain = _normalize_domain(domain or DEFAULT_DOMAIN)
+    body_l = (body or "").lower()
+    if status_code == 403 and "not permitted to use confluence" in body_l:
+        return (
+            f"Confluence API denied for {email or 'this account'}.\n"
+            f"  If you can open https://{domain}/wiki in the browser, usually:\n"
+            f"  • Use a classic API token (no scopes) from https://id.atlassian.com/manage-profile/security/api-tokens\n"
+            f"  • Email in  nova csetup  must match the account that created the token\n"
+            f"  • Scoped tokens need different API URLs — Nova uses classic tokens on {domain}\n"
+            f"  • Otherwise request Confluence product access / confluence-users group from IT"
+        )
+    if status_code == 401:
+        return (
+            "Confluence authentication failed (401).\n"
+            "  • Check email matches the account that created the API token\n"
+            "  • Create a new token at https://id.atlassian.com and run  nova csetup"
+        )
+    if status_code == 404:
+        return f"Confluence API not found (404). Check domain is correct: {domain}"
+    snippet = (body or "").strip()[:200]
+    return f"Confluence API error ({status_code}): {snippet}"
+
+
+def _confluence_get(domain, email, token, api_path, timeout=120):
+    """GET {domain}/wiki/rest/api/{api_path} with basic auth."""
+    domain = _normalize_domain(domain)
+    path = api_path.lstrip("/")
+    url = f"https://{domain}/wiki/rest/api/{path}"
+    req = urllib.request.Request(url)
+    req.add_header("Authorization", _auth_header(email, token))
+    req.add_header("Accept", "application/json")
+    req.add_header("User-Agent", NOVA_HTTP_USER_AGENT)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            format_confluence_api_error(exc.code, body, domain=domain, email=email)
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Confluence request failed: {exc}") from exc
+
+
+def verify_confluence_access(domain, email, token):
+    """
+    Quick check that this account can use Confluence REST (before a full NGA scan).
+    Returns (True, None) or (False, error_message).
+    """
+    if not all([domain, email, token]):
+        return False, "domain, email, and API token are required"
+    try:
+        _confluence_get(domain, email, token, "user/current", timeout=30)
+        return True, None
+    except RuntimeError as exc:
+        return False, str(exc)
 
 
 def _normalize_domain(domain):
@@ -274,28 +340,14 @@ def _fetch_content_batch(domain, email, token, space_key, start):
         "limit": _PAGE_LIMIT,
         "start": start,
     })
-    url = f"https://{domain}/wiki/rest/api/content?{params}"
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", _auth_header(email, token))
-    req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", NOVA_HTTP_USER_AGENT)
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    return _confluence_get(domain, email, token, f"content?{params}")
 
 
 def _fetch_all_pages(domain, email, token, space_key):
     all_pages = []
     start = 0
     while True:
-        try:
-            data = _fetch_content_batch(domain, email, token, space_key, start)
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")[:400]
-            raise RuntimeError(
-                f"Confluence API error for space {space_key} ({exc.code}): {body}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"Confluence request failed for space {space_key}: {exc}") from exc
+        data = _fetch_content_batch(domain, email, token, space_key, start)
         results = data.get("results") or []
         all_pages.extend(results)
         if len(results) < _PAGE_LIMIT:
@@ -405,6 +457,10 @@ def build_confluence_index(domain, email, token, space_key=DEFAULT_INDEX_SPACE):
     space_key = (space_key or DEFAULT_INDEX_SPACE).strip().upper()
     if not all([domain, email, token, space_key]):
         raise ValueError("domain, email, token, and space_key are required")
+
+    ok, err = verify_confluence_access(domain, email, token)
+    if not ok:
+        raise RuntimeError(err)
 
     pages = _build_pages_from_api(domain, email, token, space_key, progress=True)
     save_index_data(domain, space_key, pages)

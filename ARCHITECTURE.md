@@ -16,14 +16,19 @@ File: `~/.nova/confluence_index.json`
 
 Built by `build_confluence_index()` / refreshed by `nova csync -r`.
 
+## `nova up` flow
+
+1. Capture last terminal error (hooks)
+2. **KB** — fuzzy search; strong match → show fix and stop
+3. **Confluence** — local NGA index; strong match → AI with page text
+4. **AI** — error-only fallback; optional save to KB
+
 ## `nova ask` flow
 
 1. Warn if `last_sync` > 7 days old
-2. `search_local_index(query)` — instant, no API
-3. Show top 5 with scores
-4. If top score < 5 → user picks page 1–5 or skips
-5. Else top 3 `full_text` from index → AI (no API)
-6. Stream answer citing pages
+2. **Confluence** — `search_local_index(query)`; top 5; weak → user pick
+3. **KB** — fuzzy search; ≥70% match → show KB solution and stop
+4. **AI** — Confluence context, KB hints, or general knowledge
 
 ## Scoring (local)
 
@@ -41,4 +46,5 @@ Built by `build_confluence_index()` / refreshed by `nova csync -r`.
 |---------|--------|
 | `nova csetup` | Credentials + optional NGA full scan |
 | `nova csync -r` | Rescan NGA, show +new / ~updated |
-| `nova ask` | Local RAG + AI |
+| `nova ask` | Confluence → KB → AI |
+| `nova up` | KB → Confluence → AI |

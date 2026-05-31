@@ -6,7 +6,7 @@
 ## How It Works
 
 ```
-  Error occurs → nova up → Search KB → Show fix
+  Error occurs → nova up → KB → Confluence → AI
                                ↓ (no match)
                          AI suggests fix → Save to KB for the team
 ```
@@ -89,7 +89,7 @@ Run **`nova help`** to see the full command list and **Active Environment** (Con
 ### Support
 | Command | Description |
 |---------|-------------|
-| `nova up` | Last terminal error (KB → AI / manual prompt) |
+| `nova up` | Last terminal error (KB → Confluence → AI) |
 | `nova search [q]` | KB first, then AI |
 | `nova ask` / `nova -a [question]` | Direct AI question (no KB) |
 

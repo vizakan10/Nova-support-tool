@@ -75,6 +75,7 @@ from confluence_manager import (
     confluence_credentials_ready,
     confluence_index_exists,
     ensure_local_index,
+    verify_confluence_access,
     format_confluence_context,
     get_index_page_by_id,
     get_jira_token,
@@ -569,7 +570,7 @@ def _build_manual_prompt(error_sig, raw, last_cmd, *, detailed=False):
     return _MANUAL_PROMPT_BRIEF.format(shell=shell, context=context)
 
 
-def call_ai(error_text, ai_config):
+def call_ai(error_text, ai_config, *, prompt=None):
     """
     Call the AI using the provided ai_config dict.
     ai_config must have: provider, model, endpoint, api_key.
@@ -582,10 +583,11 @@ def call_ai(error_text, ai_config):
     if not all([provider, api_key, model, endpoint]):
         return None
 
-    prompt = _AI_PROMPT.format(
-        shell=_shell_context_label(),
-        error=_redact_for_ai(error_text),
-    )
+    if prompt is None:
+        prompt = _AI_PROMPT.format(
+            shell=_shell_context_label(),
+            error=_redact_for_ai(error_text),
+        )
 
     if provider == "claude":
         body = {
@@ -690,7 +692,7 @@ def _stream_print_words(piece):
             sys.stdout.flush()
 
 
-def call_ai_stream(error_text, ai_config):
+def call_ai_stream(error_text, ai_config, *, prompt=None):
     """Call AI with streaming; print response word-by-word. Returns parsed result dict."""
     provider = ai_config.get("provider", "")
     api_key = ai_config.get("api_key", "")
@@ -700,10 +702,11 @@ def call_ai_stream(error_text, ai_config):
     if not all([provider, api_key, model, endpoint]):
         return None
 
-    prompt = _AI_PROMPT.format(
-        shell=_shell_context_label(),
-        error=_redact_for_ai(error_text),
-    )
+    if prompt is None:
+        prompt = _AI_PROMPT.format(
+            shell=_shell_context_label(),
+            error=_redact_for_ai(error_text),
+        )
 
     if provider == "claude":
         body = {
@@ -785,11 +788,28 @@ Cite exact page titles (and URLs when relevant) in your answer.
 
 Confluence context:
 {confluence_excerpts}
-
+{kb_section}
 Question: {question}
 
 If the documentation does not contain enough information, say so clearly.
 """
+
+_AI_CONFLUENCE_UP_PROMPT = """\
+You are helping a colleague fix a command that failed in a {shell}.
+
+Error / output:
+{error}
+
+Relevant Confluence documentation:
+{confluence_excerpts}
+
+Respond in EXACTLY this format (no extra text):
+Solution: <one-sentence explanation>
+Command: <exact shell command to fix it — bash/WSL unless clearly otherwise>
+"""
+
+_ASK_KB_STRONG_THRESHOLD = 70
+_ASK_KB_DISPLAY_THRESHOLD = 55
 
 
 def call_ai_ask(query, ai_config):
@@ -1243,7 +1263,7 @@ def _run_command(command):
 # ── nova up ──────────────────────────────────────────────────────────────────
 
 def cmd_up(config):
-    """nova up — Error Intercept Protocol."""
+    """nova up — Error Intercept: KB → Confluence → AI."""
     t0 = time.monotonic()
     try:
         if _hooks_env_empty() and not _hooks_active_in_parent_shell():
@@ -1305,12 +1325,67 @@ def cmd_up(config):
                     print(f"  {C.DIM}  • ({sc}%) {entry.get('error', '')[:60]}{C.RESET}")
             return
 
+        print(f"  {C.DIM}KB — no match.{C.RESET}")
+
+        ai_pages = []
+        use_confluence = False
+        if confluence_index_exists():
+            with _Spinner(f"Searching Confluence ({DEFAULT_INDEX_SPACE})..."):
+                cf_ranked = search_local_index(error_sig, top_n=SEARCH_LOCAL_TOP)
+            if cf_ranked:
+                print(f"  {C.GREEN}📄 Confluence{C.RESET}")
+                _print_local_search_results(cf_ranked)
+                if cf_ranked[0].get("score", 0) >= MIN_STRONG_SCORE:
+                    ai_pages = pages_for_ai_context(cf_ranked, top_n=SEARCH_AI_TOP)
+                    use_confluence = True
+            else:
+                print(f"  {C.DIM}Confluence — no match.{C.RESET}")
+        elif confluence_credentials_ready():
+            print(f"  {C.DIM}Confluence — index not built (nova csync -r).{C.RESET}")
+
         ai_config = get_active_ai_config()
         if not ai_config:
-            print(f"  {C.DIM}KB searched — no match.{C.RESET}")
-            print(f"  {C.YELLOW}⚠  No AI configured — KB only. Run:  nova add-llm{C.RESET}")
+            if use_confluence:
+                print(
+                    f"  {C.YELLOW}⚠  Confluence matches found but no AI configured. "
+                    f"Run:  nova add-llm{C.RESET}"
+                )
+            else:
+                print(f"  {C.YELLOW}⚠  No AI configured — KB only. Run:  nova add-llm{C.RESET}")
             _offer_manual_prompt(error_sig, raw, last_cmd)
             return
+
+        if use_confluence and ai_pages:
+            print(f"  {C.CYAN}🤖 Asking AI (Confluence + error)...{C.RESET}")
+            _print_up_ai_intro()
+            excerpts = format_confluence_context(ai_pages, use_full_text=True)
+            cf_prompt = _AI_CONFLUENCE_UP_PROMPT.format(
+                shell=_shell_context_label(),
+                error=_redact_for_ai(raw),
+                confluence_excerpts=excerpts,
+            )
+            ai_result = call_ai_stream(raw, ai_config, prompt=cf_prompt)
+            streamed = ai_result is not None
+            if ai_result is None:
+                ai_result = call_ai(raw, ai_config, prompt=cf_prompt)
+            if ai_result and ai_result.get("solution"):
+                if not streamed:
+                    _print_up_fix_lines(ai_result["solution"], ai_result.get("command", ""))
+                _run_command_up(ai_result.get("command", ""))
+                if _ask_yn("Save fix to KB?", default_yes=False):
+                    ok, res = add_entry(
+                        kb_path,
+                        error_sig,
+                        ai_result["solution"],
+                        ai_result.get("command", ""),
+                        config.get("added_by", "unknown"),
+                    )
+                    if ok:
+                        print(f"  {C.GREEN}✅ Saved to KB.{C.RESET}")
+                    else:
+                        print(f"  {C.YELLOW}⚠  {res}{C.RESET}")
+                return
+            print(f"  {C.DIM}Confluence + AI — no solution.{C.RESET}")
 
         print(f"  {C.CYAN}🤖 Asking AI...{C.RESET}")
         _print_up_ai_intro()
@@ -1335,7 +1410,6 @@ def cmd_up(config):
                 else:
                     print(f"  {C.YELLOW}⚠  {res}{C.RESET}")
             return
-        print(f"  {C.DIM}KB searched — no match.{C.RESET}")
         print(f"  {C.YELLOW}⚠  AI couldn't provide a solution.{C.RESET}")
         _offer_manual_prompt(error_sig, raw, last_cmd)
     finally:
@@ -1716,8 +1790,8 @@ def cmd_csetup():
     """nova csetup — Save Atlassian domain, email, and Jira API token for Confluence search."""
     print(f"\n  {C.ORANGE}{C.BOLD}Confluence setup{C.RESET}")
     print(
-        f"  {C.DIM}Live search uses the Confluence REST API. "
-        f"Use your Jira/Atlassian API token — on IFS Cloud it works for Confluence too.{C.RESET}\n"
+        f"  {C.DIM}Confluence REST API — use a classic API token (no scopes) from id.atlassian.com, "
+        f"same email you use in the browser.{C.RESET}\n"
     )
     try:
         domain_in = input(
@@ -1766,17 +1840,26 @@ def cmd_csetup():
     )
 
     if scan_now in ("", "y", "yes"):
-        print(f"\n  {C.CYAN}▶ Building local RAG index ({DEFAULT_INDEX_SPACE})...{C.RESET}\n")
-        try:
-            build_confluence_index(domain, email, token, space_key=DEFAULT_INDEX_SPACE)
-        except (ValueError, RuntimeError) as exc:
-            print(f"  {C.YELLOW}⚠  Index scan failed: {exc}{C.RESET}")
-            print(f"  {C.DIM}   Retry with:  nova csync -r{C.RESET}")
+        ok, err = verify_confluence_access(domain, email, token)
+        if not ok:
+            print(f"\n  {C.YELLOW}⚠  Cannot index Confluence:{C.RESET}")
+            for line in (err or "").splitlines():
+                print(f"  {line}")
+            print()
+        else:
+            print(f"\n  {C.CYAN}▶ Building local RAG index ({DEFAULT_INDEX_SPACE})...{C.RESET}\n")
+            try:
+                build_confluence_index(domain, email, token, space_key=DEFAULT_INDEX_SPACE)
+            except (ValueError, RuntimeError) as exc:
+                print(f"  {C.YELLOW}⚠  Index scan failed:{C.RESET}")
+                for line in str(exc).splitlines():
+                    print(f"  {line}")
+                print(f"  {C.DIM}   Retry with:  nova csync -r{C.RESET}")
     if get_active_ai_config():
-        print(f"\n  {C.CYAN}Next:{C.RESET}  nova ask \"your question\"  — Confluence search + AI answer")
+        print(f"\n  {C.CYAN}Next:{C.RESET}  nova ask \"your question\"  — Confluence → KB → AI")
     else:
         print(f"\n  {C.CYAN}Next:{C.RESET}  nova add-llm  — required for AI answers in  nova ask")
-        print(f"  {C.DIM}Then:{C.RESET}   nova ask \"your question\"  — Confluence search + AI")
+        print(f"  {C.DIM}Then:{C.RESET}   nova ask \"your question\"  — Confluence → KB → AI")
     print(f"  {C.DIM}Refresh index later:{C.RESET}  nova csync -r\n")
 
 
@@ -1821,6 +1904,116 @@ def _print_local_search_results(ranked):
         print(f"     {C.BOLD}{i}.{C.RESET} {title} {C.DIM}(score: {score}){C.RESET}")
 
 
+def _format_kb_section_for_ai(kb_results, top_n=3):
+    if not kb_results:
+        return ""
+    parts = ["\nTeam knowledge base (related fixes):"]
+    for entry, score in kb_results[:top_n]:
+        err = (entry.get("error") or "")[:200]
+        sol = (entry.get("solution") or "")[:500]
+        parts.append(f"\n• ({score}% match) {err}\n  Solution: {sol}")
+    return "\n".join(parts)
+
+
+def _print_ask_kb_results(results):
+    print(f"\n  {C.GREEN}⚡ Knowledge Base{C.RESET}")
+    for entry, score in results[:3]:
+        error = entry.get("error", "")
+        solution = entry.get("solution", "")
+        command = entry.get("command", "")
+        print(f"     {C.BOLD}•{C.RESET} {error[:70]} {C.DIM}({score}%){C.RESET}")
+        print(f"       {solution[:120]}{'…' if len(solution) > 120 else ''}")
+        if command:
+            print(f"       {C.CYAN}{command}{C.RESET}")
+
+
+def _confluence_search_phase(query, *, interactive_pick=True, try_build_index=True):
+    """
+    Step 1 for nova ask: local Confluence RAG.
+    Returns (ranked, ai_pages, use_confluence).
+    """
+    ranked = []
+    ai_pages = []
+    use_confluence = False
+
+    has_index = confluence_index_exists()
+    if not has_index and try_build_index and confluence_credentials_ready():
+        has_index = ensure_local_index(interactive=True)
+
+    if has_index:
+        print(f"\n  {C.CYAN}🔍 Searching Confluence ({DEFAULT_INDEX_SPACE})...{C.RESET}")
+        ranked = search_local_index(query, top_n=SEARCH_LOCAL_TOP)
+        if ranked:
+            _print_local_search_results(ranked)
+            top_score = ranked[0].get("score", 0)
+            if top_score < MIN_STRONG_SCORE and interactive_pick:
+                picked = _ask_user_pick_confluence_page(ranked)
+                if picked:
+                    pid = picked.get("id")
+                    full = get_index_page_by_id(pid) or picked
+                    ai_pages = pages_for_ai_context([full], top_n=1)
+                    use_confluence = True
+                else:
+                    print(
+                        f"\n  {C.DIM}Skipping Confluence context for AI.{C.RESET}\n"
+                    )
+            elif top_score >= MIN_STRONG_SCORE:
+                ai_pages = pages_for_ai_context(ranked, top_n=SEARCH_AI_TOP)
+                use_confluence = True
+                print(f"\n  {C.GREEN}📄 Using top {len(ai_pages)} page(s) for AI:{C.RESET}")
+                for hit in ai_pages:
+                    sk = hit.get("space_key") or DEFAULT_INDEX_SPACE
+                    print(f"     {C.BOLD}•{C.RESET} [{sk}] {hit.get('title')}")
+                    url = (hit.get("url") or "").strip()
+                    if url:
+                        print(f"       {C.CYAN}{url}{C.RESET}")
+                print()
+        else:
+            print(f"  {C.YELLOW}⚠  Confluence — no match.{C.RESET}\n")
+    elif confluence_credentials_ready():
+        cfg = load_confluence_config()
+        token = get_jira_token()
+        ok, err = (
+            verify_confluence_access(cfg["domain"], cfg["email"], token)
+            if cfg and token
+            else (False, None)
+        )
+        if not ok and err:
+            print(f"\n  {C.YELLOW}⚠  Confluence unavailable.{C.RESET}")
+            for line in err.splitlines():
+                print(f"  {line}")
+            print()
+        else:
+            print(
+                f"\n  {C.YELLOW}⚠  No Confluence index — run  nova csync -r{C.RESET}\n"
+            )
+    else:
+        print(f"  {C.DIM}Confluence not configured.{C.RESET}\n")
+
+    return ranked, ai_pages, use_confluence
+
+
+def _kb_search_phase(query, kb_path):
+    """
+    Step 2 for nova ask: team KB.
+    Returns (strong_hit_or_none, all_results). strong_hit is (entry, score).
+    """
+    if not kb_path:
+        return None, []
+    with _Spinner("Searching KB..."):
+        resolve_conflicts(kb_path)
+        kb_data = load_kb(kb_path)
+        results = fuzzy_search(query, kb_data, threshold=_ASK_KB_DISPLAY_THRESHOLD)
+    if not results:
+        print(f"  {C.DIM}KB — no match.{C.RESET}")
+        return None, []
+    _print_ask_kb_results(results)
+    best_entry, best_score = results[0]
+    if best_score >= _ASK_KB_STRONG_THRESHOLD:
+        return (best_entry, best_score), results
+    return None, results
+
+
 def _ask_user_pick_confluence_page(ranked):
     """Low-confidence picker; returns one page dict or None."""
     print(f"\n  {C.YELLOW}No strong match found. Top {len(ranked)} closest pages:{C.RESET}")
@@ -1847,7 +2040,7 @@ def _ask_user_pick_confluence_page(ranked):
 
 
 def cmd_ask(config, query=None):
-    """nova ask — local NGA RAG search + AI answer from stored page text."""
+    """nova ask — Confluence → KB → AI."""
     t0 = time.monotonic()
     try:
         if not query or not query.strip():
@@ -1859,81 +2052,61 @@ def cmd_ask(config, query=None):
             print(f"  {C.YELLOW}⚠  No question entered.{C.RESET}")
             return
 
+        stale = index_stale_message()
+        if stale:
+            print(f"\n  {C.YELLOW}  {stale}{C.RESET}")
+
+        # 1. Confluence
+        _ranked, ai_pages, use_confluence = _confluence_search_phase(
+            query, interactive_pick=True, try_build_index=True
+        )
+
+        # 2. KB
+        kb_path = ensure_active_kb_ready()
+        kb_strong, kb_results = _kb_search_phase(query, kb_path)
+        if kb_strong:
+            entry, score = kb_strong
+            print(f"\n  {C.GREEN}✓ Using KB match ({score}%){C.RESET}")
+            display_solution(entry, score=score, source="KB")
+            cmd = entry.get("command", "")
+            if cmd:
+                _run_command(cmd)
+            return
+
+        # 3. AI
         ai_config = get_active_ai_config()
         if not ai_config:
-            if confluence_credentials_ready() and confluence_index_exists():
+            if use_confluence or kb_results:
                 print(
-                    f"\n  {C.YELLOW}⚠  AI not configured — local search only.{C.RESET}"
+                    f"\n  {C.YELLOW}⚠  AI not configured — search results above only.{C.RESET}"
                 )
-                print(f"  {C.DIM}   Add AI:  nova add-llm{C.RESET}")
+                print(f"  {C.DIM}   Add AI:  nova add-llm{C.RESET}\n")
             else:
                 print(f"  {C.RED}❌ AI not configured. Run:  nova add-llm{C.RESET}")
                 if not confluence_index_exists():
                     print(f"  {C.DIM}   Index docs:  nova csetup{C.RESET}")
                 print()
-                return
-
-        stale = index_stale_message()
-        if stale:
-            print(f"\n  {C.YELLOW}  {stale}{C.RESET}")
-
-        ranked = []
-        ai_pages = []
-        use_confluence = False
-
-        has_index = confluence_index_exists()
-        if not has_index and confluence_credentials_ready():
-            has_index = ensure_local_index(interactive=True)
-
-        if has_index:
-            print(f"\n  {C.CYAN}🔍 Searching local {DEFAULT_INDEX_SPACE} index...{C.RESET}")
-            ranked = search_local_index(query, top_n=SEARCH_LOCAL_TOP)
-            if ranked:
-                _print_local_search_results(ranked)
-                top_score = ranked[0].get("score", 0)
-                if top_score < MIN_STRONG_SCORE:
-                    picked = _ask_user_pick_confluence_page(ranked)
-                    if picked:
-                        pid = picked.get("id")
-                        full = get_index_page_by_id(pid) or picked
-                        ai_pages = pages_for_ai_context([full], top_n=1)
-                        use_confluence = True
-                    else:
-                        print(f"\n  {C.DIM}Skipping Confluence context — using AI general knowledge.{C.RESET}\n")
-                else:
-                    ai_pages = pages_for_ai_context(ranked, top_n=SEARCH_AI_TOP)
-                    use_confluence = True
-                    print(f"\n  {C.GREEN}📄 Using top {len(ai_pages)} page(s) for AI:{C.RESET}")
-                    for hit in ai_pages:
-                        sk = hit.get("space_key") or DEFAULT_INDEX_SPACE
-                        print(f"     {C.BOLD}•{C.RESET} [{sk}] {hit.get('title')}")
-                        url = (hit.get("url") or "").strip()
-                        if url:
-                            print(f"       {C.CYAN}{url}{C.RESET}")
-                    print()
-            else:
-                print(f"  {C.YELLOW}⚠  No matches in local index.{C.RESET}\n")
-        elif confluence_credentials_ready():
-            print(
-                f"\n  {C.YELLOW}⚠  No local index — answer is from AI only (not IFS Confluence).{C.RESET}"
-            )
-            print(f"  {C.DIM}   Build index:  nova csync -r{C.RESET}\n")
-        else:
-            print(f"  {C.DIM}Confluence not configured — AI only.{C.RESET}\n")
-
-        if not ai_config:
             return
 
+        kb_section = _format_kb_section_for_ai(kb_results) if kb_results else ""
         if use_confluence and ai_pages:
             excerpts = format_confluence_context(ai_pages, use_full_text=True)
             prompt = _AI_CONFLUENCE_ASK_PROMPT.format(
                 confluence_excerpts=excerpts,
+                kb_section=kb_section,
                 question=query.strip(),
             )
-            print(f"  {C.CYAN}🤖 Answering with Confluence context...{C.RESET}\n")
+            label = "Confluence"
+            if kb_results:
+                label += " + KB hints"
+            print(f"  {C.CYAN}🤖 Answering with {label}...{C.RESET}\n")
+            answer = call_ai_ask_stream(prompt, ai_config)
+        elif kb_results:
+            prompt = _AI_ASK_PROMPT.format(query=query.strip()) + kb_section
+            print(f"  {C.CYAN}🤖 Answering with KB context...{C.RESET}\n")
             answer = call_ai_ask_stream(prompt, ai_config)
         else:
-            print(f"  {C.CYAN}🤖 Asking AI (no Confluence context)...{C.RESET}\n")
+            print(f"  {C.CYAN}🤖 Asking AI...{C.RESET}\n")
             answer = call_ai_ask_stream(
                 _AI_ASK_PROMPT.format(query=query.strip()),
                 ai_config,
@@ -2257,9 +2430,9 @@ def cmd_help():
     sep = f"  {C.ORANGE}{'─' * 78}{C.RESET}"
     print(f"  {C.BOLD}{'Category':<12} {'Command':<24} {'Description':<38}{C.RESET}")
     print(sep)
-    print(f"  {'Support':<12} {'nova up':<24} {'Last error: KB → AI → run fix.':<38}")
+    print(f"  {'Support':<12} {'nova up':<24} {'Last error: KB → Confluence → AI.':<38}")
     print(f"  {'':<12} {'nova search [q]':<24} {'KB first, then AI.':<38}")
-    print(f"  {'':<12} {'nova ask / -a [q]':<24} {'Confluence search + AI answer.':<38}")
+    print(f"  {'':<12} {'nova ask / -a [q]':<24} {'Confluence → KB → AI answer.':<38}")
     print(sep)
     print(f"  {'Knowledge':<12} {'nova add':<24} {'Add one error/solution to KB.':<38}")
     print(f"  {'':<12} {'nova kb list':<24} {'List KB entries (with ID).':<38}")
@@ -2288,7 +2461,10 @@ def cmd_help():
     print(f"  {'':<12} {'nova ano':<24} {'Announcements.':<38}")
     print(f"  {'':<12} {'nova fresh / help':<24} {'Reset all / this guide.':<38}")
     print(sep)
-    print(f"  {C.ORANGE}  Workflow{C.RESET}  Fail a command →  nova up  → KB → AI.  Company docs →  nova ask")
+    print(
+        f"  {C.ORANGE}  Workflow{C.RESET}  Fail a command →  nova up  → KB → Confluence → AI.  "
+        f"Questions →  nova ask  → Confluence → KB → AI"
+    )
     print(
         f"  {C.ORANGE}  Hooks{C.RESET}     New terminal or  source ~/.bashrc  — check  "
         f"{C.CYAN}echo $NOVA_SESSION_DIR{C.RESET}"
