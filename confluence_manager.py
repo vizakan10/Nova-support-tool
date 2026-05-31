@@ -35,6 +35,9 @@ _INDEX_STALE_DAYS = 7
 _SUMMARY_LEN = 300
 _KEYWORD_COUNT = 20
 _AI_DOC_CHAR_LIMIT = 12000
+_AI_DOC_CHAR_LIMIT_ASK = 5000
+_AI_CONTEXT_TOTAL_CHARS = 14000
+_SEARCH_POOL_TOP = 15
 
 _STOPWORDS = frozenset({
     "the", "is", "and", "to", "a", "in", "of", "for", "with", "that", "this",
@@ -382,6 +385,17 @@ def split_query_words(query):
     return words
 
 
+def _word_matches_text(word, text_l):
+    """Match query token to title/body (debug/debugger, vscode)."""
+    if word in text_l:
+        return True
+    if word.startswith("debug") and "debug" in text_l:
+        return True
+    if word == "vscode" and ("vscode" in text_l or "vs code" in text_l):
+        return True
+    return False
+
+
 def _page_to_rag_entry(domain, page, space_key):
     title = (page.get("title") or "Untitled").strip()
     storage = (page.get("body") or {}).get("storage") or {}
@@ -530,13 +544,19 @@ def _score_rag_page(page, query_words, phrase):
     if not keywords and text_l:
         keywords = _tokenize_for_keywords(text_l[:2000])
     score = 0
+    title_hits = 0
     for w in query_words:
-        if w in title_l:
+        if _word_matches_text(w, title_l):
             score += 5
-        if w in keywords:
+            title_hits += 1
+        if any(_word_matches_text(w, k) for k in keywords):
             score += 3
-        if w in text_l:
+        if _word_matches_text(w, text_l):
             score += 1
+    if title_hits >= 2:
+        score += 10
+    if title_l.startswith("wip:") or title_l.startswith("[wip]"):
+        score -= 4
     if phrase and len(phrase) >= 4:
         if phrase in title_l:
             score += 10
@@ -575,14 +595,51 @@ def search_local_index(query, top_n=_SEARCH_LOCAL_TOP):
     return scored[:top_n]
 
 
-def pages_for_ai_context(ranked_pages, top_n=_SEARCH_AI_TOP):
+def select_pages_for_ai_context(ranked_pages, query, top_n=_SEARCH_AI_TOP):
+    """Pick best pages for AI using query + score (title relevance beats tie scores)."""
+    if not ranked_pages:
+        return []
+    query_words = split_query_words(query)
+
+    def _ai_rank(page):
+        base = page.get("score", 0)
+        title_l = (page.get("title") or "").lower()
+        if title_l.startswith("wip:") or title_l.startswith("[wip]"):
+            base -= 4
+        title_hits = sum(1 for w in query_words if _word_matches_text(w, title_l))
+        return base + (title_hits * 6)
+
+    ordered = sorted(ranked_pages, key=lambda p: (-_ai_rank(p), p.get("title") or ""))
+    return pages_for_ai_context(
+        ordered,
+        top_n=top_n,
+        char_limit_per_page=_AI_DOC_CHAR_LIMIT_ASK,
+        total_char_limit=_AI_CONTEXT_TOTAL_CHARS,
+    )
+
+
+def pages_for_ai_context(
+    ranked_pages,
+    top_n=_SEARCH_AI_TOP,
+    *,
+    char_limit_per_page=_AI_DOC_CHAR_LIMIT,
+    total_char_limit=None,
+):
     """Top pages using stored full_text (no API)."""
     out = []
+    total = 0
     for page in ranked_pages[:top_n]:
         full_text = (
             page.get("full_text") or page.get("text") or page.get("summary") or ""
         )
-        text = full_text[:_AI_DOC_CHAR_LIMIT] if len(full_text) > _AI_DOC_CHAR_LIMIT else full_text
+        limit = char_limit_per_page
+        if total_char_limit is not None:
+            remaining = total_char_limit - total
+            if remaining <= 0:
+                break
+            limit = min(limit, remaining)
+        text = full_text[:limit] if len(full_text) > limit else full_text
+        total += len(text)
         out.append({
             "id": page.get("id"),
             "title": page.get("title") or "Untitled",

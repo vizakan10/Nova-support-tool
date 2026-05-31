@@ -82,6 +82,8 @@ from confluence_manager import (
     index_stale_message,
     load_confluence_config,
     pages_for_ai_context,
+    select_pages_for_ai_context,
+    _SEARCH_POOL_TOP,
     parse_priority_spaces_input,
     refresh_confluence_index,
     resolve_sync_space_keys,
@@ -783,15 +785,18 @@ Question: {query}
 """
 
 _AI_CONFLUENCE_ASK_PROMPT = """\
-You are a technical assistant for a software team. Answer using the full Confluence page text below.
-Cite exact page titles (and URLs when relevant) in your answer.
+You are a technical assistant for a software team. Answer ONLY from the Confluence excerpts below.
+
+Rules:
+- Do not invent file paths, JSON, YAML, or config blocks. Quote only what appears in the excerpts.
+- Be concise: short numbered steps (max ~15 lines of answer text).
+- Prefer the page whose title best matches the question; cite its title and URL.
+- If excerpts lack enough detail, say which linked page to open and stop.
 
 Confluence context:
 {confluence_excerpts}
 {kb_section}
 Question: {question}
-
-If the documentation does not contain enough information, say so clearly.
 """
 
 _AI_CONFLUENCE_UP_PROMPT = """\
@@ -852,7 +857,7 @@ def call_ai_ask(query, ai_config):
     return (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
 
 
-def call_ai_ask_stream(prompt, ai_config, *, max_tokens=800):
+def call_ai_ask_stream(prompt, ai_config, *, max_tokens=500):
     """Stream a free-form AI answer to stdout. Returns full text or None."""
     if not prompt or not ai_config:
         return None
@@ -1336,7 +1341,9 @@ def cmd_up(config):
                 print(f"  {C.GREEN}📄 Confluence{C.RESET}")
                 _print_local_search_results(cf_ranked)
                 if cf_ranked[0].get("score", 0) >= MIN_STRONG_SCORE:
-                    ai_pages = pages_for_ai_context(cf_ranked, top_n=SEARCH_AI_TOP)
+                    ai_pages = select_pages_for_ai_context(
+                        cf_ranked, error_sig, top_n=SEARCH_AI_TOP
+                    )
                     use_confluence = True
             else:
                 print(f"  {C.DIM}Confluence — no match.{C.RESET}")
@@ -1942,7 +1949,8 @@ def _confluence_search_phase(query, *, interactive_pick=True, try_build_index=Tr
 
     if has_index:
         print(f"\n  {C.CYAN}🔍 Searching Confluence ({DEFAULT_INDEX_SPACE})...{C.RESET}")
-        ranked = search_local_index(query, top_n=SEARCH_LOCAL_TOP)
+        pool = search_local_index(query, top_n=_SEARCH_POOL_TOP)
+        ranked = pool[:SEARCH_LOCAL_TOP]
         if ranked:
             _print_local_search_results(ranked)
             top_score = ranked[0].get("score", 0)
@@ -1951,14 +1959,16 @@ def _confluence_search_phase(query, *, interactive_pick=True, try_build_index=Tr
                 if picked:
                     pid = picked.get("id")
                     full = get_index_page_by_id(pid) or picked
-                    ai_pages = pages_for_ai_context([full], top_n=1)
+                    ai_pages = pages_for_ai_context([full], top_n=1, char_limit_per_page=8000)
                     use_confluence = True
                 else:
                     print(
                         f"\n  {C.DIM}Skipping Confluence context for AI.{C.RESET}\n"
                     )
             elif top_score >= MIN_STRONG_SCORE:
-                ai_pages = pages_for_ai_context(ranked, top_n=SEARCH_AI_TOP)
+                ai_pages = select_pages_for_ai_context(
+                    pool, query, top_n=SEARCH_AI_TOP
+                )
                 use_confluence = True
                 print(f"\n  {C.GREEN}📄 Using top {len(ai_pages)} page(s) for AI:{C.RESET}")
                 for hit in ai_pages:
