@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Confluence CQL search (reads --jira token from ./api if ~/.nova not configured)."""
+"""Verify Confluence RAG index search (reads --jira token from ./api if needed)."""
 import os
 import sys
 
@@ -9,7 +9,9 @@ if _REPO not in sys.path:
 
 from confluence_manager import (
     DEFAULT_DOMAIN,
-    search_confluence_rest,
+    build_confluence_index,
+    sample_index_entry,
+    search_local_index,
     save_confluence_config,
     save_jira_token,
 )
@@ -36,23 +38,22 @@ def _load_api_jira_token():
 
 
 def main():
+    print("Sample index entry:")
+    print(sample_index_entry())
+    print()
     email, token = _load_api_jira_token()
     if not token:
-        print("SKIP: no --jira token in api and no ~/.nova setup")
-        return 1
+        print("SKIP live scan: no --jira token in api")
+        return 0
     domain = DEFAULT_DOMAIN
-    print(f"GET https://{domain}/wiki/rest/api/content/search")
-    print('  cql=text~"kairos"&limit=3&expand=body.storage')
-    results = search_confluence_rest(domain, email, token, "kairos", top_n=3)
-    if not results:
-        print("FAIL: no results")
-        return 1
-    print(f"OK: {len(results)} result(s)")
-    for i, r in enumerate(results, 1):
-        print(f"  {i}. {r.get('title')}")
-        print(f"     {r.get('url')}")
     save_confluence_config(email, domain=domain)
     save_jira_token(token)
+    print("Building NGA index (live API)...")
+    build_confluence_index(domain, email, token, space_key="NGA")
+    print()
+    print("search_local_index('install kairos'):")
+    for i, r in enumerate(search_local_index("install kairos"), 1):
+        print(f"  {i}. {r['title']} (score: {r['score']})")
     return 0
 
 

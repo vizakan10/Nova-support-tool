@@ -1,50 +1,44 @@
 # Nova — Architecture
 
-## Confluence and Jira authentication
+## NGA local RAG index
 
-Nova talks to **Atlassian Cloud** at `ifsdev.atlassian.net` (configurable via `nova csetup`).
+File: `~/.nova/confluence_index.json`
 
-On this instance, a **Jira API token** works for Confluence REST as well.
-
-| File | Contents |
-|------|----------|
-| `confluence_config.json` | `domain`, `email`, `space_keys`, `priority_spaces` |
-| `secrets.json` | `jira` API token |
-| `confluence_index.json` | Light index: `id`, `title`, `url`, `summary`, `space_key` |
-
-Default **priority space**: `NGA` (Next Generation Architecture).
-
-## `nova csetup`
-
-1. Atlassian domain (default `ifsdev.atlassian.net`)
-2. Email
-3. Jira/Atlassian API token
-4. **Priority spaces** `[NGA]` — searched first (comma-separated, e.g. `NGA,KAIROS`)
-5. **Scan priority spaces now?** `[Y/n]` — builds `confluence_index.json` (titles, IDs, summaries)
-
-## `nova ask` — search flow
-
-```
-Question
-  → Local index keyword search (priority spaces only) → top 3 page IDs
-  → GET /wiki/rest/api/content/{id}?expand=body.storage  (full content for AI)
-  → If no/local miss:
-       Stage 1 CQL: text ~ "query" AND space in ("NGA",...) ORDER BY lastModified DESC
-       If ≥3 hits → use those
-       Else Stage 2: text ~ "query" across all spaces
-  → Rank: title +3/word, priority space +5, URL +2/word → top 3
-  → AI prompt with excerpts → streamed answer
+```json
+{
+  "last_sync": "2026-05-31T12:00:00Z",
+  "space_key": "NGA",
+  "domain": "ifsdev.atlassian.net",
+  "page_count": 87,
+  "pages": [ { "id", "title", "url", "space", "full_text", "keywords", "summary", "last_updated" } ]
+}
 ```
 
-Display: `• [NGA] Kairos Deployment Process`
+Built by `build_confluence_index()` / refreshed by `nova csync -r`.
 
-## `nova csync`
+## `nova ask` flow
 
-Full download of sync spaces (`KAIROS`, `NGA`, `NEXUZ`, `NEXT`) with page body text. Optional; `nova ask` works with light index + live API.
+1. Warn if `last_sync` > 7 days old
+2. `search_local_index(query)` — instant, no API
+3. Show top 5 with scores
+4. If top score < 5 → user picks page 1–5 or skips
+5. Else top 3 `full_text` from index → AI (no API)
+6. Stream answer citing pages
 
-## Module map
+## Scoring (local)
 
-| Module | Role |
-|--------|------|
-| `nova_cli.py` | CLI: `csetup`, `csync`, `ask` |
-| `confluence_manager.py` | Index scan, two-stage CQL, ranking, hydration |
+| Signal | Points |
+|--------|--------|
+| Query word in title | +5 each |
+| Query word in keywords | +3 each |
+| Query word in full_text | +1 each |
+| Exact phrase in title | +10 |
+| Exact phrase in full_text | +5 |
+
+## Commands
+
+| Command | Action |
+|---------|--------|
+| `nova csetup` | Credentials + optional NGA full scan |
+| `nova csync -r` | Rescan NGA, show +new / ~updated |
+| `nova ask` | Local RAG + AI |

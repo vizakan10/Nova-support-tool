@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Nova CLI — Confluence sync (local index) and smart search for nova ask.
-Uses a Jira API token for auth; on IFS Cloud it also works for Confluence.
+Nova CLI — NGA Confluence local RAG index + search for nova ask.
 """
 
 import base64
@@ -12,20 +11,43 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
+from datetime import datetime, timezone
 
 from config import CONFIG_DIR, NOVA_HTTP_USER_AGENT, load_secrets, save_secrets
 
 DEFAULT_DOMAIN = "ifsdev.atlassian.net"
 DEFAULT_SPACES = ["KAIROS", "NGA", "NEXUZ", "NEXT"]
 DEFAULT_PRIORITY_SPACES = ["NGA"]
+DEFAULT_INDEX_SPACE = "NGA"
 
 CONFLUENCE_CONFIG_FILE = os.path.join(CONFIG_DIR, "confluence_config.json")
 CONFLUENCE_INDEX_FILE = os.path.join(CONFIG_DIR, "confluence_index.json")
 
 _PAGE_LIMIT = 50
-_SEARCH_TOP_N = 3
-_STAGE1_MIN_RESULTS = 3
-_SUMMARY_MAX_LEN = 500
+_SEARCH_LOCAL_TOP = 5
+_SEARCH_AI_TOP = 3
+MIN_STRONG_SCORE = 5
+_MIN_STRONG_SCORE = MIN_STRONG_SCORE
+SEARCH_LOCAL_TOP = _SEARCH_LOCAL_TOP
+SEARCH_AI_TOP = _SEARCH_AI_TOP
+_INDEX_STALE_DAYS = 7
+_SUMMARY_LEN = 300
+_KEYWORD_COUNT = 20
+_AI_DOC_CHAR_LIMIT = 12000
+
+_STOPWORDS = frozenset({
+    "the", "is", "and", "to", "a", "in", "of", "for", "with", "that", "this",
+    "it", "are", "was", "be", "have", "has", "or", "but", "not", "on", "at",
+    "by", "an", "as", "from", "into", "your", "you", "we", "our", "can", "will",
+    "would", "should", "could", "been", "being", "their", "there", "when", "what",
+    "which", "who", "how", "all", "any", "each", "other", "than", "then", "them",
+    "these", "those", "such", "only", "also", "may", "might", "must", "shall",
+    "do", "does", "did", "done", "am", "if", "so", "no", "yes", "up", "out",
+    "about", "over", "after", "before", "between", "through", "during", "without",
+    "within", "while", "where", "why", "because", "until", "unless", "upon",
+    "via", "per", "etc", "eg", "ie", "want", "need", "like", "just", "get",
+})
 
 
 def _ensure_dir():
@@ -33,7 +55,6 @@ def _ensure_dir():
 
 
 def resolve_sync_space_keys(additional=None):
-    """Default Kairos-related spaces plus optional extra keys (uppercased, deduped)."""
     keys = []
     seen = set()
     for sk in list(DEFAULT_SPACES) + list(additional or []):
@@ -45,7 +66,6 @@ def resolve_sync_space_keys(additional=None):
 
 
 def resolve_priority_spaces(keys=None):
-    """Priority search spaces; NGA first by default."""
     out = []
     seen = set()
     for sk in list(DEFAULT_PRIORITY_SPACES) + list(keys or []):
@@ -57,7 +77,6 @@ def resolve_priority_spaces(keys=None):
 
 
 def parse_priority_spaces_input(raw):
-    """Parse comma-separated space keys; empty input → default NGA."""
     if not (raw or "").strip():
         return list(DEFAULT_PRIORITY_SPACES)
     parts = [p.strip().upper() for p in raw.split(",") if p.strip()]
@@ -65,7 +84,6 @@ def parse_priority_spaces_input(raw):
 
 
 def load_confluence_config():
-    """Load {domain, email, space_keys, priority_spaces} (no token)."""
     if not os.path.isfile(CONFLUENCE_CONFIG_FILE):
         return None
     try:
@@ -91,7 +109,6 @@ def load_confluence_config():
 
 
 def save_confluence_config(email, space_keys=None, domain=None, priority_spaces=None):
-    """Persist Confluence settings (token stored separately)."""
     _ensure_dir()
     existing = {}
     if os.path.isfile(CONFLUENCE_CONFIG_FILE):
@@ -100,10 +117,8 @@ def save_confluence_config(email, space_keys=None, domain=None, priority_spaces=
                 existing = json.load(fh)
         except (json.JSONDecodeError, OSError):
             existing = {}
-
     if priority_spaces is None:
         priority_spaces = existing.get("priority_spaces")
-
     cfg = {
         "domain": _normalize_domain(domain or existing.get("domain") or DEFAULT_DOMAIN),
         "email": (email or existing.get("email") or "").strip(),
@@ -117,7 +132,6 @@ def save_confluence_config(email, space_keys=None, domain=None, priority_spaces=
 
 
 def save_jira_token(token):
-    """Store Jira API token (works for Confluence REST on IFS Atlassian Cloud)."""
     secrets = load_secrets()
     tok = (token or "").strip()
     secrets["jira"] = tok
@@ -144,13 +158,13 @@ def confluence_credentials_ready():
 
 
 def confluence_index_exists():
-    return os.path.isfile(CONFLUENCE_INDEX_FILE)
+    data = load_index_data()
+    return bool(data and data.get("pages"))
 
 
 def _auth_header(email, token):
     raw = f"{email}:{token}".encode("utf-8")
-    encoded = base64.b64encode(raw).decode("ascii")
-    return f"Basic {encoded}"
+    return base64.b64encode(raw).decode("ascii")
 
 
 def _normalize_domain(domain):
@@ -168,8 +182,7 @@ def _html_to_text(raw_html):
     text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw_html, flags=re.I | re.S)
     text = re.sub(r"<[^>]+>", " ", text)
     text = html.unescape(text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _page_id(page):
@@ -177,12 +190,10 @@ def _page_id(page):
 
 
 def _page_url(domain, page):
-    """Build a browser URL from Confluence _links (page, folder, database, etc.)."""
     links = page.get("_links") or {}
     webui = (links.get("webui") or "").strip()
     tinyui = (links.get("tinyui") or "").strip()
     base = (links.get("base") or "").strip().rstrip("/")
-
     if webui.startswith("http://") or webui.startswith("https://"):
         return webui
     if webui:
@@ -195,17 +206,15 @@ def _page_url(domain, page):
         return f"https://{domain}/wiki/{tinyui}"
     if base and page.get("id"):
         return f"{base}/pages/viewpage.action?pageId={page.get('id')}"
-
-    page_id = page.get("id", "")
-    if page_id:
-        return f"https://{domain}/wiki/pages/viewpage.action?pageId={page_id}"
+    pid = page.get("id", "")
+    if pid:
+        return f"https://{domain}/wiki/pages/viewpage.action?pageId={pid}"
     return (page.get("url") or "").strip()
 
 
 def _last_updated(page):
     version = page.get("version") or {}
-    when = version.get("when") or page.get("history", {}).get("lastUpdated", {}).get("when")
-    return when or ""
+    return version.get("when") or page.get("history", {}).get("lastUpdated", {}).get("when") or ""
 
 
 def _hit_space_key(hit):
@@ -218,17 +227,7 @@ def _hit_space_key(hit):
     sp = expandable.get("space") or ""
     if "/space/" in sp:
         return sp.rstrip("/").split("/")[-1].upper()
-    return (hit.get("space_key") or "").strip().upper()
-
-
-def _page_summary(page, max_len=_SUMMARY_MAX_LEN):
-    storage = (page.get("body") or {}).get("storage") or {}
-    text = _html_to_text(storage.get("value") or "")
-    if text:
-        if len(text) > max_len:
-            return text[:max_len] + "..."
-        return text
-    return (page.get("title") or "Untitled").strip()
+    return (hit.get("space_key") or hit.get("space") or "").strip().upper()
 
 
 def _fetch_content_batch(domain, email, token, space_key, start):
@@ -261,7 +260,6 @@ def _fetch_all_pages(domain, email, token, space_key):
             ) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Confluence request failed for space {space_key}: {exc}") from exc
-
         results = data.get("results") or []
         all_pages.extend(results)
         if len(results) < _PAGE_LIMIT:
@@ -270,411 +268,306 @@ def _fetch_all_pages(domain, email, token, space_key):
     return all_pages
 
 
-def _pages_to_index_entries(domain, all_pages, space_key, *, light=False):
-    """Full index (text) or light index (id, title, url, summary) for fast local search."""
-    total = len(all_pages)
-    index = []
-    for i, page in enumerate(all_pages, 1):
-        title = (page.get("title") or "Untitled").strip()
-        sk = _hit_space_key(page) or space_key
-        print(f"  [{sk}] Indexing page {i}/{total}: {title}...", flush=True)
-
-        entry = {
-            "id": _page_id(page),
-            "title": title,
-            "url": _page_url(domain, page),
-            "space_key": sk,
-            "last_updated": _last_updated(page),
-        }
-        if light:
-            entry["summary"] = _page_summary(page)
-        else:
-            storage = (page.get("body") or {}).get("storage") or {}
-            entry["text"] = _html_to_text(storage.get("value") or "")
-            entry["summary"] = entry["text"][:_SUMMARY_MAX_LEN] if entry["text"] else title
-        index.append(entry)
-    return index
-
-
-def sync_priority_spaces_index(domain, email, token, priority_spaces=None):
-    """
-    Light scan of priority spaces → ~/.nova/confluence_index.json
-    (id, title, url, summary) for fast local page picking in nova ask.
-    """
-    domain = _normalize_domain(domain)
-    priority_spaces = resolve_priority_spaces(priority_spaces)
-    if not all([domain, email, token]) or not priority_spaces:
-        raise ValueError("domain, email, token, and priority_spaces are required")
-
-    merged = []
-    for space_key in priority_spaces:
-        print(f"\n  Priority space {space_key}:", flush=True)
-        pages = _fetch_all_pages(domain, email, token, space_key)
-        merged.extend(_pages_to_index_entries(domain, pages, space_key, light=True))
-
-    _ensure_dir()
-    with open(CONFLUENCE_INDEX_FILE, "w", encoding="utf-8") as fh:
-        json.dump(merged, fh, indent=2, ensure_ascii=False)
-    return len(merged)
-
-
-def sync_confluence_space(domain, email, token, space_key):
-    domain = _normalize_domain(domain)
-    space_key = (space_key or "").strip().upper()
-    if not all([domain, email, token, space_key]):
-        raise ValueError("domain, email, token, and space_key are required")
-    pages = _fetch_all_pages(domain, email, token, space_key)
-    return _pages_to_index_entries(domain, pages, space_key, light=False)
-
-
-def sync_confluence_spaces(domain, email, token, space_keys):
-    domain = _normalize_domain(domain)
-    space_keys = resolve_sync_space_keys(space_keys)
-    if not all([domain, email, token]) or not space_keys:
-        raise ValueError("domain, email, token, and at least one space_key are required")
-
-    merged = []
-    for space_key in space_keys:
-        print(f"\n  Space {space_key}:", flush=True)
-        merged.extend(sync_confluence_space(domain, email, token, space_key))
-
-    _ensure_dir()
-    with open(CONFLUENCE_INDEX_FILE, "w", encoding="utf-8") as fh:
-        json.dump(merged, fh, indent=2, ensure_ascii=False)
-    return len(merged)
-
-
-def sync_confluence(domain, email, token, space_key):
-    return sync_confluence_spaces(domain, email, token, [space_key])
-
-
-def _query_words(query):
+def _tokenize_for_keywords(text):
     words = []
-    for w in re.split(r"\s+", (query or "").lower()):
-        w = w.strip(".,;:!?\"'()[]{}")
-        if len(w) >= 2:
+    for w in re.findall(r"[a-z0-9][a-z0-9_-]{1,}", (text or "").lower()):
+        if w not in _STOPWORDS and len(w) >= 3:
             words.append(w)
     return words
 
 
-def _rank_hit(hit, words, priority_spaces):
-    """Title +3/word, priority space +5, URL +2/word."""
-    if not words:
-        return 0
-    title_l = (hit.get("title") or "").lower()
-    url_l = (hit.get("url") or "").lower()
-    sk = (hit.get("space_key") or "").strip().upper()
-    score = 0
-    for w in words:
-        if w in title_l:
-            score += 3
-        if w in url_l:
-            score += 2
-    if sk in priority_spaces:
-        score += 5
-    return score
-
-
-def _excerpt(text, words, length=300):
-    text = text or ""
-    if not text:
-        return ""
-    text_l = text.lower()
-    pos = -1
-    for w in words:
-        idx = text_l.find(w)
-        if idx >= 0 and (pos < 0 or idx < pos):
-            pos = idx
-    if pos < 0:
-        start = 0
-        snippet = text[:length]
-    else:
-        half = length // 2
-        start = max(0, pos - half)
-        end = min(len(text), start + length)
-        if end - start < length:
-            start = max(0, end - length)
-        snippet = text[start:end]
-    snippet = re.sub(r"\s+", " ", snippet).strip()
-    if start > 0:
-        snippet = "..." + snippet
-    if len(text) > start + length:
-        snippet = snippet + "..."
-    return snippet
-
-
-def _build_text_cql(query, space_keys=None):
-    q = (query or "").strip()
-    if not q:
-        return None
-    escaped = q.replace("\\", "\\\\").replace('"', '\\"')
-    cql = f'text ~ "{escaped}"'
-    if space_keys:
-        keys = ", ".join(f'"{k}"' for k in resolve_priority_spaces(space_keys))
-        cql += f" AND space in ({keys})"
-    cql += " ORDER BY lastModified DESC"
-    return cql
-
-
-def _confluence_api_get(domain, email, token, path_query):
-    domain = _normalize_domain(domain)
-    url = f"https://{domain}/wiki/rest/api/{path_query.lstrip('/')}"
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", _auth_header(email, token))
-    req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", NOVA_HTTP_USER_AGENT)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:400]
-        raise RuntimeError(f"Confluence API error ({exc.code}): {body}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Confluence request failed: {exc}") from exc
-
-
-def fetch_content_by_id(domain, email, token, page_id):
-    """Fetch one page with full body for AI context."""
-    if not page_id:
-        return None
-    params = urllib.parse.urlencode({"expand": "body.storage,version,space"})
-    return _confluence_api_get(domain, email, token, f"content/{page_id}?{params}")
-
-
-def _search_cql(domain, email, token, query, space_keys=None, limit=10):
-    cql = _build_text_cql(query, space_keys=space_keys)
-    if not cql:
+def extract_keywords(full_text, count=_KEYWORD_COUNT):
+    """Top keywords by frequency (stopwords removed)."""
+    tokens = _tokenize_for_keywords(full_text)
+    if not tokens:
         return []
-    params = urllib.parse.urlencode({
-        "cql": cql,
-        "limit": limit,
-        "expand": "body.storage,space",
-    })
-    data = _confluence_api_get(domain, email, token, f"content/search?{params}")
-    return data.get("results") or []
+    freq = Counter(tokens)
+    return [w for w, _ in freq.most_common(count)]
 
 
-def _hit_to_result(domain, hit, words, priority_spaces):
-    title = (hit.get("title") or "Untitled").strip()
-    url = _page_url(domain, hit)
-    sk = _hit_space_key(hit)
-    storage = (hit.get("body") or {}).get("storage") or {}
-    text = _html_to_text(storage.get("value") or "")
-    if text:
-        excerpt = _excerpt(text, words) if words else (text[:300] + ("..." if len(text) > 300 else ""))
-    else:
-        excerpt = (hit.get("summary") or title)
+def split_query_words(query):
+    words = []
+    for w in re.split(r"\s+", (query or "").lower()):
+        w = w.strip(".,;:!?\"'()[]{}")
+        if len(w) >= 2 and w not in _STOPWORDS:
+            words.append(w)
+    return words
+
+
+def _page_to_rag_entry(domain, page, space_key):
+    title = (page.get("title") or "Untitled").strip()
+    storage = (page.get("body") or {}).get("storage") or {}
+    full_text = _html_to_text(storage.get("value") or "")
+    sk = _hit_space_key(page) or space_key
+    summary = full_text[:_SUMMARY_LEN] + ("..." if len(full_text) > _SUMMARY_LEN else "") if full_text else title
     return {
-        "id": _page_id(hit),
+        "id": _page_id(page),
         "title": title,
-        "url": url,
-        "excerpt": excerpt,
+        "url": _page_url(domain, page),
+        "space": sk,
         "space_key": sk,
-        "score": _rank_hit(
-            {"title": title, "url": url, "space_key": sk},
-            words,
-            priority_spaces,
-        ),
+        "full_text": full_text,
+        "keywords": extract_keywords(full_text),
+        "summary": summary,
+        "last_updated": _last_updated(page),
     }
 
 
-def _search_local_index_ranked(query, priority_spaces, top_n=10):
-    """Keyword search on local index; prefer priority spaces."""
-    if not confluence_index_exists():
-        return []
+def _build_pages_from_api(domain, email, token, space_key, progress=True):
+    space_key = (space_key or DEFAULT_INDEX_SPACE).strip().upper()
+    raw_pages = _fetch_all_pages(domain, email, token, space_key)
+    total = len(raw_pages)
+    entries = []
+    for i, page in enumerate(raw_pages, 1):
+        entry = _page_to_rag_entry(domain, page, space_key)
+        if progress:
+            print(f"  Scanning page {i}/{total}: {entry['title']}...", flush=True)
+        entries.append(entry)
+    return entries
+
+
+def load_index_data():
+    if not os.path.isfile(CONFLUENCE_INDEX_FILE):
+        return None
     try:
         with open(CONFLUENCE_INDEX_FILE, "r", encoding="utf-8") as fh:
-            pages = json.load(fh)
+            data = json.load(fh)
     except (json.JSONDecodeError, OSError):
+        return None
+    if isinstance(data, list):
+        return {
+            "last_sync": None,
+            "space_key": DEFAULT_INDEX_SPACE,
+            "domain": DEFAULT_DOMAIN,
+            "page_count": len(data),
+            "pages": data,
+        }
+    if isinstance(data, dict) and data.get("pages"):
+        return data
+    return None
+
+
+def save_index_data(domain, space_key, pages):
+    _ensure_dir()
+    payload = {
+        "last_sync": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "space_key": (space_key or DEFAULT_INDEX_SPACE).strip().upper(),
+        "domain": _normalize_domain(domain),
+        "page_count": len(pages),
+        "pages": pages,
+    }
+    with open(CONFLUENCE_INDEX_FILE, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, ensure_ascii=False)
+    return payload
+
+
+def build_confluence_index(domain, email, token, space_key=DEFAULT_INDEX_SPACE):
+    """
+    Full RAG scan of one Confluence space → ~/.nova/confluence_index.json
+    """
+    domain = _normalize_domain(domain)
+    space_key = (space_key or DEFAULT_INDEX_SPACE).strip().upper()
+    if not all([domain, email, token, space_key]):
+        raise ValueError("domain, email, token, and space_key are required")
+
+    pages = _build_pages_from_api(domain, email, token, space_key, progress=True)
+    save_index_data(domain, space_key, pages)
+    print(f"  ✓ Indexed {len(pages)} pages from {space_key} space")
+    return len(pages)
+
+
+def refresh_confluence_index(domain, email, token, space_key=DEFAULT_INDEX_SPACE):
+    """
+    Rescan space and report new/updated pages vs previous index.
+    Returns {new, updated, total, pages}.
+    """
+    domain = _normalize_domain(domain)
+    space_key = (space_key or DEFAULT_INDEX_SPACE).strip().upper()
+    old_data = load_index_data() or {}
+    old_by_id = {p.get("id"): p for p in (old_data.get("pages") or []) if p.get("id")}
+
+    print(f"  ↻ Refreshing {space_key} index...")
+    new_pages = _build_pages_from_api(domain, email, token, space_key, progress=True)
+
+    new_count = 0
+    updated_count = 0
+    for page in new_pages:
+        pid = page.get("id")
+        old = old_by_id.get(pid)
+        if not old:
+            new_count += 1
+        elif (old.get("last_updated") or "") != (page.get("last_updated") or ""):
+            updated_count += 1
+
+    save_index_data(domain, space_key, new_pages)
+    print(f"  + {new_count} new page{'s' if new_count != 1 else ''} found")
+    print(f"  ~ {updated_count} page{'s' if updated_count != 1 else ''} updated")
+    print(f"  ✓ Index updated — {len(new_pages)} pages total")
+    return {
+        "new": new_count,
+        "updated": updated_count,
+        "total": len(new_pages),
+        "pages": new_pages,
+    }
+
+
+def index_stale_message():
+    """Return warning string if index older than 7 days, else None."""
+    data = load_index_data()
+    if not data or not data.get("last_sync"):
+        return None
+    try:
+        synced = datetime.fromisoformat(data["last_sync"].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    age_days = (datetime.now(timezone.utc) - synced).days
+    if age_days > _INDEX_STALE_DAYS:
+        return (
+            f"⚠ Confluence index is {age_days} days old. "
+            f"Run: nova csync -r to refresh"
+        )
+    return None
+
+
+def _score_rag_page(page, query_words, phrase):
+    title_l = (page.get("title") or "").lower()
+    text_l = (page.get("full_text") or page.get("text") or "").lower()
+    keywords = [k.lower() for k in (page.get("keywords") or [])]
+    score = 0
+    for w in query_words:
+        if w in title_l:
+            score += 5
+        if w in keywords:
+            score += 3
+        if w in text_l:
+            score += 1
+    if phrase and len(phrase) >= 4:
+        if phrase in title_l:
+            score += 10
+        if phrase in text_l:
+            score += 5
+    return score
+
+
+def search_local_index(query, top_n=_SEARCH_LOCAL_TOP):
+    """
+    Search local RAG index. Returns top N dicts with score, title, url, summary,
+    id, space, full_text (for AI).
+    """
+    data = load_index_data()
+    if not data:
         return []
-    if not isinstance(pages, list):
+    pages = data.get("pages") or []
+    if not pages:
         return []
 
-    words = _query_words(query)
-    if not words:
+    query_words = split_query_words(query)
+    phrase = (query or "").strip().lower()
+    if not query_words and not phrase:
         return []
 
-    priority_set = set(resolve_priority_spaces(priority_spaces))
     scored = []
     for page in pages:
-        sk = (page.get("space_key") or "").upper()
-        if priority_set and sk and sk not in priority_set:
-            continue
-        body = page.get("summary") or page.get("text") or ""
-        hit = {
-            "id": page.get("id") or "",
-            "title": page.get("title") or "",
-            "url": page.get("url") or "",
-            "space_key": sk,
-            "summary": body,
-        }
-        score = _rank_hit(hit, words, priority_spaces)
+        score = _score_rag_page(page, query_words, phrase)
         if score > 0:
-            hit["score"] = score
-            scored.append(hit)
+            item = dict(page)
+            item["score"] = score
+            item["space_key"] = page.get("space") or page.get("space_key") or ""
+            scored.append(item)
 
     scored.sort(key=lambda x: (-x["score"], x.get("title") or ""))
     return scored[:top_n]
 
 
-def _hydrate_from_local_picks(domain, email, token, picks, query, priority_spaces):
-    """Fetch full content for top local index matches."""
-    words = _query_words(query)
+def pages_for_ai_context(ranked_pages, top_n=_SEARCH_AI_TOP):
+    """Top pages using stored full_text (no API)."""
     out = []
-    for pick in picks:
-        pid = pick.get("id")
-        if pid:
-            try:
-                page = fetch_content_by_id(domain, email, token, pid)
-            except RuntimeError:
-                page = None
-            if page:
-                item = _hit_to_result(domain, page, words, priority_spaces)
-                item["score"] = max(item.get("score", 0), pick.get("score", 0))
-                if not (item.get("url") or "").strip() and pick.get("url"):
-                    item["url"] = pick["url"]
-                out.append(item)
-                continue
-        item = {
-            "id": pid,
-            "title": pick.get("title") or "Untitled",
-            "url": pick.get("url") or _page_url(domain, {"id": pid}),
-            "excerpt": _excerpt(pick.get("summary") or "", words),
-            "space_key": pick.get("space_key") or "",
-            "score": pick.get("score", 0),
-        }
-        out.append(item)
-    return _finalize_results(out, priority_spaces, words, domain=domain)
-
-
-def _api_hits_to_ranked(domain, hits, query, priority_spaces):
-    words = _query_words(query)
-    out = []
-    for hit in hits:
-        if not isinstance(hit, dict):
-            continue
-        item = _hit_to_result(domain, hit, words, priority_spaces)
-        out.append(item)
-    out.sort(key=lambda x: (-x.get("score", 0), x.get("title") or ""))
+    for page in ranked_pages[:top_n]:
+        full_text = page.get("full_text") or page.get("text") or page.get("summary") or ""
+        text = full_text[:_AI_DOC_CHAR_LIMIT] if len(full_text) > _AI_DOC_CHAR_LIMIT else full_text
+        out.append({
+            "id": page.get("id"),
+            "title": page.get("title") or "Untitled",
+            "url": page.get("url") or "",
+            "space_key": page.get("space") or page.get("space_key") or "",
+            "excerpt": text,
+            "score": page.get("score", 0),
+        })
     return out
 
 
-def _dedupe_by_id(hits):
-    seen = set()
-    out = []
-    for h in hits:
-        hid = _page_id(h) if isinstance(h, dict) else ""
-        if hid and hid in seen:
-            continue
-        if hid:
-            seen.add(hid)
-        out.append(h)
-    return out
-
-
-def _ensure_result_urls(domain, items):
-    """Fill missing URLs from page id so nova ask can print links."""
-    domain = _normalize_domain(domain)
-    for item in items:
-        if (item.get("url") or "").strip():
-            continue
-        pid = item.get("id")
-        if pid:
-            item["url"] = f"https://{domain}/wiki/pages/viewpage.action?pageId={pid}"
-    return items
-
-
-def _finalize_results(items, priority_spaces, words, domain=None):
-    """Re-rank, drop internal scores, return top N."""
-    for item in items:
-        if "score" not in item or not item["score"]:
-            item["score"] = _rank_hit(item, words, priority_spaces)
-    items.sort(key=lambda x: (-x.get("score", 0), x.get("title") or ""))
-    top = items[:_SEARCH_TOP_N]
-    for item in top:
-        item.pop("score", None)
-    if domain:
-        _ensure_result_urls(domain, top)
-    return top
-
-
-def search_confluence_rest(domain, email, token, query, top_n=None, priority_spaces=None):
-    """Two-stage CQL search with ranking (legacy direct REST entry)."""
-    priority_spaces = resolve_priority_spaces(priority_spaces)
-    top_n = top_n if top_n is not None else _SEARCH_TOP_N
-    words = _query_words(query)
-
-    stage1 = _search_cql(domain, email, token, query, space_keys=priority_spaces, limit=10)
-    if len(stage1) >= _STAGE1_MIN_RESULTS:
-        ranked = _api_hits_to_ranked(domain, stage1, query, priority_spaces)
-        return _finalize_results(ranked, priority_spaces, words, domain=domain)[:top_n]
-
-    stage2 = _search_cql(domain, email, token, query, space_keys=None, limit=10)
-    combined = _dedupe_by_id(stage1 + stage2)
-    ranked = _api_hits_to_ranked(domain, combined, query, priority_spaces)
-    return _finalize_results(ranked, priority_spaces, words, domain=domain)[:top_n]
-
-
-def search_confluence_local(query, top_n=3):
-    """Search local index only (no API hydration)."""
-    cfg = load_confluence_config()
-    priority = cfg.get("priority_spaces") if cfg else DEFAULT_PRIORITY_SPACES
-    ranked = _search_local_index_ranked(query, priority, top_n=top_n or _SEARCH_TOP_N)
-    words = _query_words(query)
-    dom = (cfg or {}).get("domain") or DEFAULT_DOMAIN
-    return _finalize_results(ranked, priority, words, domain=dom)
-
-
-def search_confluence(query, top_n=None, domain=None, email=None, token=None):
-    """
-    Smart search for nova ask:
-      1) Local priority-space index → top page IDs (instant)
-      2) Fetch full content for those pages via API
-      3) Else two-stage CQL (priority spaces, then all spaces) + rank → top 3
-    """
-    cfg = load_confluence_config()
-    if cfg:
-        domain = domain or cfg.get("domain")
-        email = email or cfg.get("email")
-        priority_spaces = cfg.get("priority_spaces") or DEFAULT_PRIORITY_SPACES
-    else:
-        priority_spaces = list(DEFAULT_PRIORITY_SPACES)
-    token = token or get_jira_token()
-    if not all([domain, email, token]):
-        return []
-
-    top_n = top_n if top_n is not None else _SEARCH_TOP_N
-    words = _query_words(query)
-
-    local_ranked = _search_local_index_ranked(query, priority_spaces, top_n=10)
-    if local_ranked and local_ranked[0].get("score", 0) > 0:
-        hydrated = _hydrate_from_local_picks(
-            domain, email, token, local_ranked[:top_n], query, priority_spaces
-        )
-        if hydrated:
-            _ensure_result_urls(domain, hydrated)
-            return hydrated
-
-    stage1 = _search_cql(domain, email, token, query, space_keys=priority_spaces, limit=10)
-    if len(stage1) >= _STAGE1_MIN_RESULTS:
-        ranked = _api_hits_to_ranked(domain, stage1, query, priority_spaces)
-        return _finalize_results(ranked, priority_spaces, words, domain=domain)[:top_n]
-
-    stage2 = _search_cql(domain, email, token, query, space_keys=None, limit=10)
-    combined = _dedupe_by_id(stage1 + stage2)
-    ranked = _api_hits_to_ranked(domain, combined, query, priority_spaces)
-    return _finalize_results(ranked, priority_spaces, words, domain=domain)[:top_n]
-
-
-def format_confluence_context(results):
+def format_confluence_context(results, *, use_full_text=False):
     if not results:
         return ""
     parts = []
     for i, r in enumerate(results, 1):
         title = r.get("title") or "Untitled"
-        sk = r.get("space_key") or ""
+        sk = r.get("space_key") or r.get("space") or ""
         label = f"[{sk}] {title}" if sk else title
         url = r.get("url") or ""
-        excerpt = r.get("excerpt") or ""
-        parts.append(f"--- Document {i}: {label} ---\nURL: {url}\n{excerpt}")
+        body = r.get("excerpt") or r.get("summary") or ""
+        if use_full_text:
+            body = r.get("excerpt") or r.get("full_text") or r.get("summary") or ""
+        parts.append(f"--- Document {i}: {label} ---\nURL: {url}\n{body}")
     return "\n\n".join(parts)
+
+
+def get_index_page_by_id(page_id):
+    data = load_index_data()
+    if not data:
+        return None
+    for page in data.get("pages") or []:
+        if str(page.get("id")) == str(page_id):
+            return page
+    return None
+
+
+# ── Legacy / compat ───────────────────────────────────────────────────────────
+
+def sync_priority_spaces_index(domain, email, token, priority_spaces=None):
+    space = (resolve_priority_spaces(priority_spaces) or [DEFAULT_INDEX_SPACE])[0]
+    return build_confluence_index(domain, email, token, space_key=space)
+
+
+def sync_confluence_spaces(domain, email, token, space_keys):
+    """Full multi-space sync (legacy); prefer build_confluence_index for NGA RAG."""
+    domain = _normalize_domain(domain)
+    space_keys = resolve_sync_space_keys(space_keys)
+    merged = []
+    for space_key in space_keys:
+        print(f"\n  Space {space_key}:", flush=True)
+        merged.extend(_build_pages_from_api(domain, email, token, space_key, progress=True))
+    save_index_data(domain, space_keys[0] if space_keys else DEFAULT_INDEX_SPACE, merged)
+    return len(merged)
+
+
+def sync_confluence_space(domain, email, token, space_key):
+    return build_confluence_index(domain, email, token, space_key=space_key)
+
+
+def sync_confluence(domain, email, token, space_key):
+    return build_confluence_index(domain, email, token, space_key=space_key)
+
+
+def search_confluence(query, top_n=None, domain=None, email=None, token=None):
+    """Primary search: local RAG index (no API)."""
+    _ = domain, email, token
+    return search_local_index(query, top_n=top_n or _SEARCH_LOCAL_TOP)
+
+
+def search_confluence_local(query, top_n=3):
+    return search_local_index(query, top_n=top_n)
+
+
+def sample_index_entry():
+    """Example entry shape for documentation."""
+    return {
+        "id": "3419865246",
+        "title": "NGA / Kairos Planning Page - Y26Q4",
+        "url": "https://ifsdev.atlassian.net/wiki/spaces/AFPM/pages/3419865246/NGA+Kairos+Planning+Page",
+        "space": "NGA",
+        "full_text": "This page describes the Kairos deployment process for the NGA team...",
+        "keywords": ["kairos", "deployment", "nga", "staging", "pipeline", "helm"],
+        "summary": "This page describes the Kairos deployment process for the NGA team. Prerequisites include...",
+        "last_updated": "2026-05-15T10:30:00.000Z",
+    }
