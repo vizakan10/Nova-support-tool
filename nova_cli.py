@@ -2585,95 +2585,112 @@ def cmd_fresh():
 
 # ── nova help ────────────────────────────────────────────────────────────────
 
-def _print_nova_commands_quick_ref():
-    """Compact list of every nova subcommand (shown for nova / nova help)."""
-    groups = [
-        ("Support", (
-            "nova up",
-            "nova search [q]",
-            "nova ask  ·  nova -a  (words, no quotes)",
-        )),
-        ("Knowledge", (
-            "nova add",
-            "nova kb list  ·  rm  ·  path",
-            "nova add-kb  ·  use-kb",
-        )),
-        ("Confluence", (
-            "nova csetup",
-            "nova csync  ·  nova csync -r",
-        )),
-        ("AI / LLM", (
-            "nova setup",
-            "nova add-llm  ·  use <nick>  ·  set-provider",
-            "nova model  ·  apikey  ·  test",
-        )),
-        ("System", (
-            "nova list  ·  config",
-            "nova update  ·  nova update --pull  ·  nova update --setup",
-            "nova install-hooks  ·  version  ·  ano  ·  fresh  ·  help",
-        )),
-    ]
-    print(f"  {C.ORANGE}{C.BOLD}Available commands{C.RESET}\n")
-    for label, cmds in groups:
-        print(f"  {C.BOLD}{label}{C.RESET}")
-        for line in cmds:
-            print(f"    {C.CYAN}{line}{C.RESET}")
-        print()
+_HELP_WIDTH = 78
+
+# (category, command, description) — single help table, orange-themed
+_HELP_COMMAND_ROWS = (
+    ("Support", (
+        ("nova up", "Last terminal error → Confluence → KB → AI"),
+        ("nova search …", "Team KB search, then AI"),
+        ("nova ask …", "Ask anything → Confluence → KB → AI"),
+        ("nova -a …", "Short alias for nova ask"),
+    )),
+    ("Knowledge", (
+        ("nova add", "Add error + solution to KB"),
+        ("nova kb list", "List KB entries (with ID)"),
+        ("nova kb rm <id>", "Delete entry by ID"),
+        ("nova kb path", "View or change KB folder"),
+        ("nova add-kb", "Register another KB file"),
+        ("nova use-kb", "Switch active KB"),
+    )),
+    ("Confluence", (
+        ("nova csetup", "Atlassian domain, token, NGA spaces"),
+        ("nova csync", "Refresh local Confluence index"),
+        ("nova csync -r", "Full rescan; show new/updated pages"),
+    )),
+    ("AI / LLM", (
+        ("nova setup", "KB + AI setup wizard"),
+        ("nova add-llm", "Add AI provider profile"),
+        ("nova use <nick>", "Switch AI profile"),
+        ("nova set-provider", "Pick profile (interactive)"),
+        ("nova model", "Change model for active profile"),
+        ("nova apikey", "Update API key"),
+        ("nova test", "Test AI connection"),
+    )),
+    ("System", (
+        ("nova list", "KB paths and AI profiles"),
+        ("nova config", "Active paths and provider"),
+        ("nova update", "Reinstall CLI (keeps ~/.nova)"),
+        ("nova update --pull", "git pull + reinstall"),
+        ("nova update --setup", "Reinstall + setup wizard"),
+        ("nova install-hooks", "Shell hooks + tab completion"),
+        ("nova version", "Installed version"),
+        ("nova ano", "Team announcements"),
+        ("nova fresh", "Reset all Nova data"),
+        ("nova help", "Show this guide"),
+    )),
+)
+
+
+def _help_rule(char="─"):
+    return f"  {C.ORANGE}{char * _HELP_WIDTH}{C.RESET}"
+
+
+def _print_help_command_table():
+    """Orange command table (nova / nova help)."""
+    print(f"  {C.ORANGE}{C.BOLD}Commands{C.RESET}\n")
+    print(
+        f"  {C.ORANGE}{C.BOLD}{'Category':<14}{C.RESET} "
+        f"{C.ORANGE}{C.BOLD}{'Command':<22}{C.RESET} "
+        f"{C.ORANGE}{C.BOLD}Description{C.RESET}"
+    )
+    print(_help_rule())
+    for gi, (category, rows) in enumerate(_HELP_COMMAND_ROWS):
+        for i, (cmd, desc) in enumerate(rows):
+            if i == 0:
+                pad = max(0, 14 - len(category))
+                cat = f"{C.ORANGE}{category}{C.RESET}{' ' * pad}"
+            else:
+                cat = " " * 14
+            print(f"  {cat} {C.CYAN}{cmd:<22}{C.RESET} {C.DIM}{desc}{C.RESET}")
+        if gi < len(_HELP_COMMAND_ROWS) - 1:
+            print(_help_rule())
+    print(_help_rule("═"))
+
+
+def _print_help_footer():
+    """Workflow, examples, and tips — orange labels."""
+    print(f"  {C.ORANGE}{C.BOLD}Quick start{C.RESET}")
+    print(
+        f"  {C.DIM}Errors{C.RESET}     Run a failing command, then  "
+        f"{C.CYAN}nova up{C.RESET}  {C.DIM}→ Confluence → KB → AI{C.RESET}"
+    )
+    print(
+        f"  {C.DIM}Questions{C.RESET}  "
+        f"{C.CYAN}nova ask i want to install kairos{C.RESET}  "
+        f"{C.DIM}(spaces OK — no quotes needed){C.RESET}"
+    )
+    print()
+    print(f"  {C.ORANGE}{C.BOLD}Tips{C.RESET}")
+    print(
+        f"  {C.ORANGE}Hooks{C.RESET}    "
+        f"{C.DIM}New shell or{C.RESET}  source ~/.bashrc  "
+        f"{C.DIM}· check{C.RESET}  {C.CYAN}echo $NOVA_SESSION_DIR{C.RESET}"
+    )
+    print(
+        f"  {C.ORANGE}Updates{C.RESET}  "
+        f"{C.DIM}After{C.RESET}  git pull  {C.DIM}→{C.RESET}  "
+        f"{C.CYAN}nova update --pull{C.RESET}"
+    )
+    print()
 
 
 def cmd_help():
-    """nova help — Print full docs (table + Active Environment). Prompts for setup if first run."""
+    """nova help — Banner, command table, tips, Active Environment."""
     print(BANNER)
-    _print_nova_commands_quick_ref()
-    print(f"  {C.ORANGE}{C.BOLD}Command reference{C.RESET}\n")
-    # Table format: Category | Command | Description (match reference image)
-    sep = f"  {C.ORANGE}{'─' * 78}{C.RESET}"
-    print(f"  {C.BOLD}{'Category':<12} {'Command':<24} {'Description':<38}{C.RESET}")
-    print(sep)
-    print(f"  {'Support':<12} {'nova up':<24} {'Last error: Confluence → KB → AI.':<38}")
-    print(f"  {'':<12} {'nova search words...':<24} {'KB first, then AI (no quotes).':<38}")
-    print(f"  {'':<12} {'nova ask / -a words...':<24} {'Ask anything (no quotes needed).':<38}")
-    print(sep)
-    print(f"  {'Knowledge':<12} {'nova add':<24} {'Add one error/solution to KB.':<38}")
-    print(f"  {'':<12} {'nova kb list':<24} {'List KB entries (with ID).':<38}")
-    print(f"  {'':<12} {'nova kb rm <ID>':<24} {'Delete KB entry by ID.':<38}")
-    print(f"  {'':<12} {'nova kb path':<24} {'View or change KB folder.':<38}")
-    print(f"  {'':<12} {'nova add-kb / use-kb':<24} {'Add or switch KB source.':<38}")
-    print(sep)
-    print(f"  {'Confluence':<12} {'nova csetup':<24} {'Domain, token, priority spaces (NGA).':<38}")
-    print(f"  {'':<12} {'nova csync':<24} {'Refresh NGA RAG index (full scan).':<38}")
-    print(f"  {'':<12} {'nova csync -r':<24} {'Rescan NGA; show new/updated pages.':<38}")
-    print(sep)
-    print(f"  {'AI / LLM':<12} {'nova setup':<24} {'Configure KB + AI (wizard).':<38}")
-    print(f"  {'':<12} {'nova add-llm':<24} {'Add an AI provider.':<38}")
-    print(f"  {'':<12} {'nova use <nick>':<24} {'Switch AI profile.':<38}")
-    print(f"  {'':<12} {'nova set-provider':<24} {'Pick AI profile (interactive).':<38}")
-    print(f"  {'':<12} {'nova model / apikey':<24} {'Change model or API key.':<38}")
-    print(f"  {'':<12} {'nova test':<24} {'Test AI connection.':<38}")
-    print(sep)
-    print(f"  {'System':<12} {'nova list':<24} {'KB paths + AI profiles.':<38}")
-    print(f"  {'':<12} {'nova config':<24} {'Active config + paths.':<38}")
-    print(f"  {'':<12} {'nova update':<24} {'Reinstall CLI (keeps ~/.nova).':<38}")
-    print(f"  {'':<12} {'nova update --pull':<24} {'git pull + reinstall (after changes).':<38}")
-    print(f"  {'':<12} {'nova update --setup':<24} {'Reinstall then KB/AI wizard.':<38}")
-    print(f"  {'':<12} {'nova install-hooks':<24} {'Shell hooks + tab completion.':<38}")
-    print(f"  {'':<12} {'nova version':<24} {'Show installed version.':<38}")
-    print(f"  {'':<12} {'nova ano':<24} {'Announcements.':<38}")
-    print(f"  {'':<12} {'nova fresh / help':<24} {'Reset all / this guide.':<38}")
-    print(sep)
-    print(
-        f"  {C.ORANGE}  Workflow{C.RESET}  Fail a command →  nova up  → Confluence → KB → AI.  "
-        f"Questions →  nova ask  → Confluence → KB → AI"
-    )
-    print(
-        f"  {C.ORANGE}  Hooks{C.RESET}     New terminal or  source ~/.bashrc  — check  "
-        f"{C.CYAN}echo $NOVA_SESSION_DIR{C.RESET}"
-    )
-    print(
-        f"  {C.ORANGE}  Updates{C.RESET}    After  git pull  in the repo →  "
-        f"{C.CYAN}nova update --pull{C.RESET}  {C.DIM}(or{C.RESET}  bash update.sh{C.DIM}){C.RESET}"
-    )
     print()
+    _print_help_command_table()
+    _print_help_footer()
     _active_env()
     # First-time: prompt for setup if no config or no active KB
     cfg = load_config()
