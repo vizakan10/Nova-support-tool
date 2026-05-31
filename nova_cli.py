@@ -425,6 +425,37 @@ def _redact_for_ai(text):
     return text
 
 
+_MANUAL_PROMPT = """\
+You are a senior DevOps engineer helping a colleague.
+I ran the following command and it failed.
+
+Command:
+{command}
+
+Error:
+{error}
+
+Full output:
+{output}
+
+Respond in EXACTLY this format (no extra text):
+Solution: <one-sentence explanation>
+Command: <exact CLI command to fix it>
+"""
+
+
+def _build_manual_prompt(error_sig, raw, last_cmd):
+    """Build a redacted, copy-paste prompt for the user to drop into any LLM."""
+    command = _redact_for_ai(last_cmd) if last_cmd else "(unknown)"
+    error = _redact_for_ai(error_sig) if error_sig else "(see output below)"
+    output = _redact_for_ai(_truncate_for_ai(raw)) if raw else "(none)"
+    return _MANUAL_PROMPT.format(
+        command=command.strip() or "(unknown)",
+        error=error.strip() or "(see output below)",
+        output=output.strip() or "(none)",
+    )
+
+
 def call_ai(error_text, ai_config):
     """
     Call the AI using the provided ai_config dict.
@@ -742,6 +773,37 @@ def _print_up_fix_lines(solution, command):
         print(f"  {C.BOLD}Command:{C.RESET}  {C.CYAN}{command}{C.RESET}")
 
 
+def _offer_manual_prompt(error_sig, raw, last_cmd):
+    """Offer a ready-to-paste LLM prompt (with context) when no AI is available."""
+    if not _ask_yn("Want a ready-to-paste prompt with context?", default_yes=True):
+        return
+
+    prompt = _build_manual_prompt(error_sig, raw, last_cmd)
+
+    print()
+    print(f"  {C.CYAN}📋 Copy the prompt below into your LLM (ChatGPT, Claude, etc.):{C.RESET}")
+    print(f"  {C.DIM}{'─' * 44}{C.RESET}")
+    print(prompt)
+    print(f"  {C.DIM}{'─' * 44}{C.RESET}")
+
+    copied = False
+    try:
+        subprocess.run(
+            "clip.exe",
+            input=prompt.encode("utf-8"),
+            shell=True,
+            check=True,
+            stderr=subprocess.DEVNULL,
+        )
+        copied = True
+    except Exception:
+        pass
+
+    if copied:
+        print(f"  {C.GREEN}📋 Prompt copied to clipboard!{C.RESET}")
+    print(f"  {C.DIM}Tip: once you have the fix, run  nova add  to save it for your team.{C.RESET}")
+
+
 def _print_done_footer(start_time):
     elapsed = time.monotonic() - start_time
     plain = f"Done in {elapsed:.1f}s"
@@ -939,8 +1001,8 @@ def cmd_up(config):
 
         ai_config = get_active_ai_config()
         if not ai_config:
-            print(f"\n  {C.RED}No AI provider configured. Run: nova setup{C.RESET}")
-            print(f"  {C.DIM}Tip: run  nova add  to save a fix for your team.{C.RESET}")
+            print(f"\n  {C.YELLOW}No AI provider configured.{C.RESET}")
+            _offer_manual_prompt(error_sig, raw, last_cmd)
             return
 
         _print_up_ai_intro()
@@ -966,7 +1028,7 @@ def cmd_up(config):
                     print(f"  {C.YELLOW}⚠  {res}{C.RESET}")
             return
         print(f"  {C.YELLOW}⚠  AI couldn't provide a solution.{C.RESET}")
-        print(f"  {C.DIM}Tip: run  nova add  to save a fix for your team.{C.RESET}")
+        _offer_manual_prompt(error_sig, raw, last_cmd)
     finally:
         _print_done_footer(t0)
 
