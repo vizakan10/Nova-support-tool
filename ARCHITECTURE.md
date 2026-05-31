@@ -4,58 +4,47 @@
 
 Nova talks to **Atlassian Cloud** at `ifsdev.atlassian.net` (configurable via `nova csetup`).
 
-On this instance, Atlassian accepts a **single Jira API token** for both:
-
-- Jira REST (`/rest/api/3/...`)
-- Confluence REST (`/wiki/rest/api/...`)
-
-There is **no Rovo REST search API** on the site URL. `nova ask` does not call Rovo; it uses the **Confluence Content Search API**.
-
-Credentials are stored under `~/.nova/`:
+On this instance, a **Jira API token** works for Confluence REST as well.
 
 | File | Contents |
 |------|----------|
-| `confluence_config.json` | `domain`, `email`, `space_keys` (no token) |
-| `secrets.json` | `jira` API token (legacy key `confluence` still read) |
+| `confluence_config.json` | `domain`, `email`, `space_keys`, `priority_spaces` |
+| `secrets.json` | `jira` API token |
+| `confluence_index.json` | Light index: `id`, `title`, `url`, `summary`, `space_key` |
 
-## `nova csetup` — configure credentials
+Default **priority space**: `NGA` (Next Generation Architecture).
 
-Interactive setup asks only for:
+## `nova csetup`
 
-1. **Atlassian domain** (default: `ifsdev.atlassian.net`)
-2. **Email** (Atlassian account)
-3. **API token** — user is told to use their **Jira token** (works for Confluence on IFS)
+1. Atlassian domain (default `ifsdev.atlassian.net`)
+2. Email
+3. Jira/Atlassian API token
+4. **Priority spaces** `[NGA]` — searched first (comma-separated, e.g. `NGA,KAIROS`)
+5. **Scan priority spaces now?** `[Y/n]` — builds `confluence_index.json` (titles, IDs, summaries)
 
-Writes config + token. Does not download pages.
-
-## `nova ask` — live Confluence search + AI
+## `nova ask` — search flow
 
 ```
-User question
-    → GET /wiki/rest/api/content/search
-         ?cql=text ~ "<query>"
-         &limit=5
-         &expand=body.storage
-    → Basic Authorization: base64(email:jira_token)
-    → Top hits → excerpts → AI prompt with Confluence context
-    → Streamed answer
+Question
+  → Local index keyword search (priority spaces only) → top 3 page IDs
+  → GET /wiki/rest/api/content/{id}?expand=body.storage  (full content for AI)
+  → If no/local miss:
+       Stage 1 CQL: text ~ "query" AND space in ("NGA",...) ORDER BY lastModified DESC
+       If ≥3 hits → use those
+       Else Stage 2: text ~ "query" across all spaces
+  → Rank: title +3/word, priority space +5, URL +2/word → top 3
+  → AI prompt with excerpts → streamed answer
 ```
 
-Implemented in `confluence_manager.search_confluence()` → `search_confluence_rest()`.
+Display: `• [NGA] Kairos Deployment Process`
 
-If `nova csetup` was not run, `nova ask` continues with **AI only** and prints a warning.
+## `nova csync`
 
-## `nova csync` — optional local index
-
-Downloads pages from default spaces (`KAIROS`, `NGA`, `NEXUZ`, `NEXT`) into `~/.nova/confluence_index.json` for offline reference. Requires `nova csetup` first.
-
-**`nova ask` does not use the local index**; it always uses live REST search when credentials exist.
+Full download of sync spaces (`KAIROS`, `NGA`, `NEXUZ`, `NEXT`) with page body text. Optional; `nova ask` works with light index + live API.
 
 ## Module map
 
 | Module | Role |
 |--------|------|
-| `nova_cli.py` | CLI: `csetup`, `csync`, `ask`, KB, AI |
-| `confluence_manager.py` | Confluence sync, CQL REST search, token helpers |
-| `config.py` | `~/.nova` paths, AI/KB config |
-| `kb_manager.py` | Local/SharePoint KB |
+| `nova_cli.py` | CLI: `csetup`, `csync`, `ask` |
+| `confluence_manager.py` | Index scan, two-stage CQL, ranking, hydration |

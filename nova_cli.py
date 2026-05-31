@@ -65,16 +65,19 @@ from kb_manager import (
 )
 from confluence_manager import (
     DEFAULT_DOMAIN,
+    DEFAULT_PRIORITY_SPACES,
     DEFAULT_SPACES,
     confluence_credentials_ready,
     format_confluence_context,
     get_jira_token,
     load_confluence_config,
+    parse_priority_spaces_input,
     resolve_sync_space_keys,
     save_confluence_config,
     save_jira_token,
     search_confluence,
     sync_confluence_spaces,
+    sync_priority_spaces_index,
 )
 
 
@@ -1723,11 +1726,43 @@ def cmd_csetup():
     if not email or not token:
         print(f"  {C.RED}❌ Email and API token are required.{C.RESET}\n")
         return
-    save_confluence_config(email, space_keys=DEFAULT_SPACES, domain=domain)
+
+    default_prio = ",".join(DEFAULT_PRIORITY_SPACES)
+    try:
+        prio_in = input(
+            f"  {C.BOLD}Priority spaces{C.RESET} [{default_prio}]: "
+        ).strip()
+        scan_now = input(
+            f"  {C.BOLD}Scan all priority-space pages now for faster search?{C.RESET} [Y/n]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    priority_spaces = parse_priority_spaces_input(prio_in)
+    save_confluence_config(
+        email,
+        space_keys=DEFAULT_SPACES,
+        domain=domain,
+        priority_spaces=priority_spaces,
+    )
     save_jira_token(token)
     print(f"\n  {C.GREEN}✓ Saved Confluence credentials.{C.RESET}")
     print(f"  {C.DIM}Domain:{C.RESET} {domain}")
     print(f"  {C.DIM}Email:{C.RESET}  {email}")
+    print(
+        f"  {C.DIM}Priority spaces:{C.RESET} {', '.join(priority_spaces)} "
+        f"{C.DIM}(NGA = Next Generation Architecture — searched first){C.RESET}"
+    )
+
+    if scan_now in ("", "y", "yes"):
+        print(f"\n  {C.CYAN}▶ Building local index for: {', '.join(priority_spaces)}{C.RESET}")
+        try:
+            n = sync_priority_spaces_index(domain, email, token, priority_spaces)
+            print(f"  {C.GREEN}✓ Indexed {n} page{'s' if n != 1 else ''} for fast local search.{C.RESET}")
+        except (ValueError, RuntimeError) as exc:
+            print(f"  {C.YELLOW}⚠  Index scan failed: {exc}{C.RESET}")
+            print(f"  {C.DIM}   You can retry with:  nova csync{C.RESET}")
     if get_active_ai_config():
         print(f"\n  {C.CYAN}Next:{C.RESET}  nova ask \"your question\"  — Confluence search + AI answer")
     else:
@@ -1762,7 +1797,12 @@ def cmd_csync(refresh=False):
         if extra:
             additional = [p.strip() for p in extra.split(",") if p.strip()]
             space_keys = resolve_sync_space_keys(list(space_keys) + additional)
-            save_confluence_config(email, space_keys=space_keys, domain=domain)
+            save_confluence_config(
+                email,
+                space_keys=space_keys,
+                domain=domain,
+                priority_spaces=cfg.get("priority_spaces"),
+            )
 
     print(f"\n  {C.DIM}Syncing {len(space_keys)} space(s): {', '.join(space_keys)}{C.RESET}")
     print()
@@ -1773,7 +1813,7 @@ def cmd_csync(refresh=False):
         return
     print(
         f"\n  {C.GREEN}✓ Synced {count} page{'s' if count != 1 else ''} to local index.{C.RESET}  "
-        f"{C.DIM}(nova ask uses live REST search){C.RESET}\n"
+        f"{C.DIM}(nova ask: local index → then API for top pages){C.RESET}\n"
     )
 
 
@@ -1806,21 +1846,16 @@ def cmd_ask(config, query=None):
         if confluence_credentials_ready():
             print(f"\n  {C.CYAN}🔍 Searching Confluence...{C.RESET}")
             try:
-                confluence_results = search_confluence(query, top_n=5)
+                confluence_results = search_confluence(query, top_n=3)
             except RuntimeError as exc:
                 print(f"  {C.RED}❌ {exc}{C.RESET}\n")
                 return
             if confluence_results:
-                n = len(confluence_results)
-                print(f"\n  {C.GREEN}📄 Found {n} page{'s' if n != 1 else ''}:{C.RESET}")
+                print(f"\n  {C.GREEN}📄 Found in Confluence:{C.RESET}")
                 for hit in confluence_results:
+                    sk = hit.get("space_key") or "?"
                     title = hit.get("title") or "Untitled"
-                    url = hit.get("url") or ""
-                    if url:
-                        print(f"     {C.BOLD}•{C.RESET} {title}")
-                        print(f"       {C.DIM}{url}{C.RESET}")
-                    else:
-                        print(f"     {C.BOLD}•{C.RESET} {title}")
+                    print(f"     {C.BOLD}•{C.RESET} [{sk}] {title}")
                 print()
 
         if not ai_config:
@@ -2175,7 +2210,7 @@ def cmd_help():
     print(f"  {'':<12} {'nova kb path':<24} {'View or change KB folder.':<38}")
     print(f"  {'':<12} {'nova add-kb / use-kb':<24} {'Add or switch KB source.':<38}")
     print(sep)
-    print(f"  {'Confluence':<12} {'nova csetup':<24} {'Domain, email, Jira token (Confluence).':<38}")
+    print(f"  {'Confluence':<12} {'nova csetup':<24} {'Domain, token, priority spaces (NGA).':<38}")
     print(f"  {'':<12} {'nova csync':<24} {'Sync Kairos spaces to local index.':<38}")
     print(f"  {'':<12} {'nova csync -r':<24} {'Re-sync with saved credentials.':<38}")
     print(sep)
