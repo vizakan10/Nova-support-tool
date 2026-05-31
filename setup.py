@@ -32,7 +32,7 @@ setup(
     python_requires=">=3.8",
     include_package_data=True,
     package_data={"": ["kb.json", "nova_hooks.sh"]},
-    data_files=[("share/nova-cli", ["nova_hooks.sh"])],
+    data_files=[("share/nova-cli", ["nova_hooks.sh", "nova_completion.sh"])],
     cmdclass={"install": PostInstall},
     classifiers=[
         "Programming Language :: Python :: 3",

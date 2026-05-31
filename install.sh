@@ -1,4 +1,5 @@
 #!/bin/bash
+sed -i 's/\r//' "$0" 2>/dev/null || sed -i '' 's/\r//' "$0" 2>/dev/null || true
 # Nova CLI — one-shot installer (no chmod needed)
 #
 #   curl -fsSL https://raw.githubusercontent.com/vizakan10/Nova-support-tool/main/install.sh | bash
@@ -7,13 +8,6 @@
 #   cd Nova-support-tool && bash install.sh
 
 set -euo pipefail
-
-# Self-fix CRLF when executed as a file (skipped for curl | bash stdin)
-if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "bash" && -f "${BASH_SOURCE[0]}" ]]; then
-    sed -i 's/\r//' "${BASH_SOURCE[0]}" 2>/dev/null \
-        || sed -i '' 's/\r//' "${BASH_SOURCE[0]}" 2>/dev/null \
-        || true
-fi
 
 REPO_URL="https://github.com/vizakan10/Nova-support-tool.git"
 REPO_DIR="${NOVA_SRC:-$HOME/.nova/nova-src}"
@@ -107,8 +101,8 @@ if [[ ":${PATH}:" != *":${LOCAL_BIN}:"* ]]; then
 fi
 export PATH="${LOCAL_BIN}:${PATH}"
 
-# ── 4. Pip install ──────────────────────────────────────────────────────────
-echo "▶ Installing Nova CLI (pip)..."
+# ── 4. Pip install (Nova + dependencies) ────────────────────────────────────
+echo "▶ Installing pip dependencies (questionary, etc.)..."
 if ! python3 -m pip install --user --break-system-packages -e .; then
     die "pip install failed. Check errors above and try again."
 fi
@@ -117,7 +111,7 @@ if ! command -v nova &>/dev/null; then
 fi
 step_ok "Nova CLI installed ($(nova version 2>/dev/null | tr -d '\n' || echo 'nova'))"
 
-# ── 5. Shell hooks ────────────────────────────────────────────────────────────
+# ── 5. Shell hooks (nova install-hooks) ─────────────────────────────────────
 echo "▶ Installing shell hooks..."
 if ! nova install-hooks; then
     die "nova install-hooks failed."
@@ -180,20 +174,26 @@ else
     step_ok "Setup complete"
 fi
 
-# ── 7b. Optional Confluence sync ───────────────────────────────────────────
+# ── 7b. Optional Confluence (company knowledge search) ──────────────────────
 _confluence_configured() {
-    [[ -f "$HOME/.nova/confluence_config.json" ]]
+    [[ -f "$HOME/.nova/confluence_config.json" ]] && [[ -f "$HOME/.nova/secrets.json" ]]
 }
 
 echo ""
 if ! _confluence_configured; then
-    read -r -p "Would you like to connect Confluence for document search? [y/N]: " connect_cf
+    read -r -p "Connect Confluence for company knowledge search? [y/N]: " connect_cf
     if [[ "${connect_cf:-}" =~ ^[Yy]$ ]]; then
         echo ""
-        if nova sync-confluence; then
-            step_ok "Confluence index ready"
+        if nova csetup; then
+            step_ok "Confluence credentials saved"
+            echo ""
+            read -r -p "Sync Confluence spaces to a local index now? [y/N]: " do_sync
+            if [[ "${do_sync:-}" =~ ^[Yy]$ ]]; then
+                nova csync -r && step_ok "Confluence index ready" || \
+                    echo "  ⚠  Sync skipped or failed — run  nova csync -r  later."
+            fi
         else
-            echo "  ⚠  Confluence sync skipped or failed — run  nova sync-confluence  later."
+            echo "  ⚠  Confluence setup skipped — run  nova csetup  later."
         fi
     fi
 fi
@@ -202,13 +202,16 @@ fi
 echo ""
 echo " ✓ Nova installed successfully"
 echo ""
-echo "  Updates (git pull):  bash update.sh   or   nova update --pull"
+echo " ┌─ Next steps ─────────────────────────────────────────────"
+echo " │  1. Open a NEW terminal  (or run:  source ~/.bashrc)"
+echo " │  2. Verify hooks:       echo \$NOVA_SESSION_DIR"
+echo " │     → should print a path (empty = hooks not active)"
+echo " │  3. Try error capture:"
+echo " │       python3 -c \"import nosuchmodule\""
+echo " │       nova up"
+echo " │  4. Try company search:  nova ask \"your question\""
+echo " │  5. Optional Confluence: nova csetup"
+echo " └──────────────────────────────────────────────────────────"
 echo ""
-echo " One-time in THIS terminal (if nova up says hooks are not loaded):"
-echo "   source ~/.bashrc"
-echo "   — or open a new terminal (hooks load automatically there)."
-echo ""
-echo " Try:"
-echo "   python3 -c \"import nosuchmodule\""
-echo "   nova up"
+echo "  Updates:  bash update.sh   or   nova update --pull"
 echo ""

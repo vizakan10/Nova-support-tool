@@ -60,3 +60,5 @@ if [[ -n "${PROMPT_COMMAND:-}" ]]; then
 else
     PROMPT_COMMAND='_nova_last_exit=$?; _nova_prompt_command'
 fi
+
+source ~/.nova/nova_completion.sh 2>/dev/null || true

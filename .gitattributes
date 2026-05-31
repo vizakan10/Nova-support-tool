@@ -2,5 +2,8 @@
 install.sh executable
 uninstall.sh executable
 update.sh executable
+fix-nova-module.sh executable
+nova_hooks.sh executable
+nova_completion.sh executable
 *.py text eol=lf
 *.json text eol=lf

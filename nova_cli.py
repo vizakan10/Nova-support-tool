@@ -44,6 +44,7 @@ from config import (
     remove_kb_source,
     switch_kb,
     list_all_kbs,
+    ensure_active_kb_ready,
     get_active_kb_path,
     normalize_kb_path,
     set_active_provider_model,
@@ -63,14 +64,17 @@ from kb_manager import (
     sanitize,
 )
 from confluence_manager import (
-    confluence_index_exists,
+    DEFAULT_DOMAIN,
+    DEFAULT_SPACES,
+    confluence_credentials_ready,
     format_confluence_context,
-    get_confluence_token,
+    get_jira_token,
     load_confluence_config,
+    resolve_sync_space_keys,
     save_confluence_config,
-    save_confluence_token,
+    save_jira_token,
     search_confluence,
-    sync_confluence,
+    sync_confluence_spaces,
 )
 
 
@@ -176,6 +180,23 @@ def _hooks_active_in_parent_shell():
     return os.path.isdir(_nova_session_dir())
 
 
+def _hooks_env_empty():
+    return not os.environ.get("NOVA_SESSION_DIR", "").strip()
+
+
+def _print_hooks_not_active_short():
+    """Short message when nova up runs before hooks are loaded."""
+    print(
+        f"  {C.YELLOW}⚠  Hooks not active. Run: "
+        f"{C.CYAN}source ~/.bashrc{C.RESET} "
+        f"{C.DIM}or open a new terminal.{C.RESET}"
+    )
+    print(
+        f"  {C.DIM}   Check:{C.RESET}  {C.CYAN}echo $NOVA_SESSION_DIR{C.RESET}  "
+        f"{C.DIM}(should print a path){C.RESET}"
+    )
+
+
 def _print_hooks_activation_reminder(*, fresh_install=False, for_nova_up=False):
     """
     Tell the user to activate hooks in this terminal (cannot be done from a child process).
@@ -220,6 +241,9 @@ def _print_hooks_activation_reminder(*, fresh_install=False, for_nova_up=False):
 
 def _print_hooks_inactive_help():
     """Explain why capture failed and how to activate hooks in this terminal."""
+    if _hooks_env_empty() and not _hooks_active_in_parent_shell():
+        _print_hooks_not_active_short()
+        return
     if _hooks_installed() and _hooks_source_line_in_bashrc():
         _print_hooks_activation_reminder(for_nova_up=True)
     elif _hooks_installed():
@@ -923,8 +947,6 @@ def _print_up_kb_hit(entry):
     solution = entry.get("solution", "")
     command = entry.get("command", "")
     print()
-    print(f"  {C.GREEN}⚡ Knowledge Base{C.RESET}")
-    print()
     print(f"  {C.BOLD}Solution:{C.RESET} {solution}")
     if command:
         print(f"  {C.BOLD}Command:{C.RESET}  {C.CYAN}{command}{C.RESET}")
@@ -932,8 +954,6 @@ def _print_up_kb_hit(entry):
 
 
 def _print_up_ai_intro():
-    print()
-    print(f"  {C.CYAN}⟳ Asking AI...{C.RESET}")
     print(f"  {C.DIM}{'─' * 44}{C.RESET}")
     sys.stdout.write("  ")
     sys.stdout.flush()
@@ -1213,10 +1233,14 @@ def cmd_up(config):
     """nova up — Error Intercept Protocol."""
     t0 = time.monotonic()
     try:
-        kb_path = get_active_kb_path()
-        if not kb_path or not os.path.isdir(kb_path):
-            print(f"  {C.RED}❌ Active KB not found or not configured.{C.RESET}")
-            print(f"  {C.DIM}   Run:  nova setup  or  nova use-kb <nickname>{C.RESET}")
+        if _hooks_env_empty() and not _hooks_active_in_parent_shell():
+            _print_hooks_not_active_short()
+            return
+
+        kb_path = ensure_active_kb_ready()
+        if not kb_path:
+            print(f"  {C.RED}❌ Active KB not configured.{C.RESET}")
+            print(f"  {C.DIM}   Run:  nova setup{C.RESET}")
             return
 
         raw = None
@@ -1226,15 +1250,9 @@ def cmd_up(config):
         merged = 0
         capture_reason = None
 
-        with _Spinner("Scanning..."):
-            merged = resolve_conflicts(kb_path)
-            captured, capture_reason = _try_hook_capture(quiet=True, silent=True)
-            if captured:
-                raw, last_cmd = captured
-            if raw:
-                error_sig = detect_error(raw) or raw.strip()[:250]
-                kb_data = load_kb(kb_path)
-                results = fuzzy_search(error_sig, kb_data, threshold=70)
+        captured, capture_reason = _try_hook_capture(quiet=True, silent=True)
+        if captured:
+            raw, last_cmd = captured
 
         if not raw:
             if capture_reason == "inactive":
@@ -1246,17 +1264,25 @@ def cmd_up(config):
                 )
             elif capture_reason == "password":
                 print(
-                    f"  {C.YELLOW}Last command looks like a password and was cleared for safety. "
-                    f"Please re-run your failing command.{C.RESET}"
+                    f"  {C.YELLOW}⚠  Last command looks like a password and was cleared for safety. "
+                    f"Re-run your failing command.{C.RESET}"
                 )
             return
 
         _print_up_header(last_cmd)
+        print(f"  {C.CYAN}🔍 Scanning...{C.RESET}")
+
+        with _Spinner("Searching KB..."):
+            merged = resolve_conflicts(kb_path)
+            error_sig = detect_error(raw) or raw.strip()[:250]
+            kb_data = load_kb(kb_path)
+            results = fuzzy_search(error_sig, kb_data, threshold=70)
 
         if merged:
             print(f"  {C.DIM}Merged {merged} OneDrive conflict entries.{C.RESET}")
 
         if results:
+            print(f"  {C.GREEN}⚡ Found in KB{C.RESET}")
             best_entry, _best_score = results[0]
             cmd = _print_up_kb_hit(best_entry)
             _run_command_up(cmd)
@@ -1268,11 +1294,12 @@ def cmd_up(config):
 
         ai_config = get_active_ai_config()
         if not ai_config:
-            print(f"\n  {C.DIM}KB searched — no match.{C.RESET}")
-            print(f"  {C.YELLOW}No AI configured.{C.RESET}")
+            print(f"  {C.DIM}KB searched — no match.{C.RESET}")
+            print(f"  {C.YELLOW}⚠  No AI configured — KB only. Run:  nova add-llm{C.RESET}")
             _offer_manual_prompt(error_sig, raw, last_cmd)
             return
 
+        print(f"  {C.CYAN}🤖 Asking AI...{C.RESET}")
         _print_up_ai_intro()
         ai_result = call_ai_stream(_truncate_for_ai(raw), ai_config)
         streamed = ai_result is not None
@@ -1306,8 +1333,8 @@ def cmd_up(config):
 
 def cmd_add(config):
     """nova add — Add a new error solution to the KB."""
-    kb_path = get_active_kb_path()
-    if not kb_path or not os.path.isdir(kb_path):
+    kb_path = ensure_active_kb_ready()
+    if not kb_path:
         print(f"  {C.RED}❌ Active KB not configured. Run:  nova setup{C.RESET}")
         return
 
@@ -1587,15 +1614,15 @@ def _find_nova_repo_root():
     return None
 
 
-def _find_nova_hooks_source():
-    """Locate nova_hooks.sh from repo, editable install, or pip data_files."""
+def _find_nova_shell_asset(filename):
+    """Locate a Nova shell asset from repo, editable install, or pip data_files."""
     here = os.path.dirname(os.path.abspath(__file__))
     repo = _find_nova_repo_root()
     candidates = [
-        os.path.join(here, "nova_hooks.sh"),
-        os.path.join(repo, "nova_hooks.sh") if repo else "",
-        os.path.join(sys.prefix, "share", "nova-cli", "nova_hooks.sh"),
-        os.path.join(os.path.expanduser("~/.local"), "share", "nova-cli", "nova_hooks.sh"),
+        os.path.join(here, filename),
+        os.path.join(repo, filename) if repo else "",
+        os.path.join(sys.prefix, "share", "nova-cli", filename),
+        os.path.join(os.path.expanduser("~/.local"), "share", "nova-cli", filename),
     ]
     for path in candidates:
         if path and os.path.isfile(path):
@@ -1603,18 +1630,19 @@ def _find_nova_hooks_source():
     return None
 
 
-def cmd_install_hooks():
-    """nova install-hooks — Install shell hooks for output capture."""
+def _find_nova_hooks_source():
+    return _find_nova_shell_asset("nova_hooks.sh")
+
+
+def _install_nova_shell_file(filename):
+    """Copy a shell asset to ~/.nova/ and strip CRLF. Returns dest path or None."""
     import shutil
 
-    source = _find_nova_hooks_source()
+    source = _find_nova_shell_asset(filename)
     if not source:
-        print(f"  {C.RED}❌ nova_hooks.sh not found in the installation.{C.RESET}")
-        print(f"  {C.DIM}   Reinstall Nova from the repo, then try again.{C.RESET}")
-        return
-
+        return None
     dest_dir = os.path.dirname(CONFIG_FILE)
-    dest = os.path.join(dest_dir, "nova_hooks.sh")
+    dest = os.path.join(dest_dir, filename)
     try:
         os.makedirs(dest_dir, exist_ok=True)
         shutil.copy2(source, dest)
@@ -1622,9 +1650,24 @@ def cmd_install_hooks():
             content = fh.read()
         with open(dest, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(content.replace("\r", ""))
-    except OSError as exc:
-        print(f"  {C.RED}❌ Could not install hooks: {exc}{C.RESET}")
+    except OSError:
+        return None
+    return dest
+
+
+def cmd_install_hooks():
+    """nova install-hooks — Install shell hooks and tab completion."""
+    hooks_dest = _install_nova_shell_file("nova_hooks.sh")
+    if not hooks_dest:
+        print(f"  {C.RED}❌ nova_hooks.sh not found in the installation.{C.RESET}")
+        print(f"  {C.DIM}   Reinstall Nova from the repo, then try again.{C.RESET}")
         return
+
+    comp_dest = _install_nova_shell_file("nova_completion.sh")
+    if comp_dest:
+        print(f"  {C.GREEN}✓{C.RESET} Tab completion installed to {C.DIM}{comp_dest}{C.RESET}")
+    else:
+        print(f"  {C.YELLOW}⚠  nova_completion.sh not found — completion skipped.{C.RESET}")
 
     bashrc = os.path.expanduser("~/.bashrc")
     hook_line = "source ~/.nova/nova_hooks.sh"
@@ -1656,92 +1699,134 @@ def cmd_install_hooks():
 
 # ── nova ask / nova -a ───────────────────────────────────────────────────────
 
-def cmd_sync_confluence(refresh=False):
-    """nova sync-confluence [--refresh] — Sync Confluence space to local index."""
-    if refresh:
-        cfg = load_confluence_config()
-        if not cfg:
-            print(f"  {C.RED}❌ No saved Confluence config. Run:  nova sync-confluence{C.RESET}")
-            return
-        token = get_confluence_token()
-        if not token:
-            print(f"  {C.RED}❌ Confluence API token missing in secrets. Run:  nova sync-confluence{C.RESET}")
-            return
-        domain = cfg["domain"]
-        email = cfg["email"]
-        space_key = cfg["space_key"]
-    else:
-        print(f"\n  {C.ORANGE}{C.BOLD}Confluence sync{C.RESET}\n")
+def cmd_csetup():
+    """nova csetup — Save Atlassian domain, email, and Jira API token for Confluence search."""
+    print(f"\n  {C.ORANGE}{C.BOLD}Confluence setup{C.RESET}")
+    print(
+        f"  {C.DIM}Live search uses the Confluence REST API. "
+        f"Use your Jira/Atlassian API token — on IFS Cloud it works for Confluence too.{C.RESET}\n"
+    )
+    try:
+        domain_in = input(
+            f"  {C.BOLD}Atlassian domain{C.RESET} [{DEFAULT_DOMAIN}]: "
+        ).strip()
+        email = input(f"  {C.BOLD}Email:{C.RESET} ").strip()
+        import getpass as gp
+        token = gp.getpass(
+            f"  {C.BOLD}API token (hidden):{C.RESET} "
+            f"{C.DIM}[Jira/Atlassian token]{C.RESET} "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    domain = domain_in or DEFAULT_DOMAIN
+    if not email or not token:
+        print(f"  {C.RED}❌ Email and API token are required.{C.RESET}\n")
+        return
+    save_confluence_config(email, space_keys=DEFAULT_SPACES, domain=domain)
+    save_jira_token(token)
+    print(f"\n  {C.GREEN}✓ Saved Confluence credentials.{C.RESET}")
+    print(f"  {C.DIM}Domain:{C.RESET} {domain}")
+    print(f"  {C.DIM}Email:{C.RESET}  {email}")
+    print(f"\n  {C.CYAN}Next:{C.RESET}  nova ask \"your question\"  — live Confluence search + AI")
+    print(f"  {C.DIM}Optional:{C.RESET}  nova csync  — download pages to ~/.nova/confluence_index.json\n")
+
+
+def cmd_csync(refresh=False):
+    """nova csync [-r] — Sync default Confluence spaces (KAIROS, NGA, NEXUZ, NEXT)."""
+    if not confluence_credentials_ready():
+        print(f"  {C.RED}❌ Confluence not configured. Run:  nova csetup{C.RESET}")
+        return
+    cfg = load_confluence_config()
+    token = get_jira_token()
+    domain = cfg["domain"]
+    email = cfg["email"]
+    space_keys = cfg["space_keys"]
+    if not refresh:
+        spaces_label = ", ".join(space_keys)
+        print(f"\n  {C.ORANGE}{C.BOLD}Confluence sync{C.RESET}")
+        print(f"  {C.DIM}Domain:{C.RESET} {domain}")
+        print(f"  {C.DIM}Spaces:{C.RESET} {spaces_label}")
         try:
-            domain = input(f"  {C.BOLD}Confluence domain{C.RESET} (e.g. yourcompany.atlassian.net): ").strip()
-            email = input(f"  {C.BOLD}Email:{C.RESET} ").strip()
-            import getpass as gp
-            token = gp.getpass(f"  {C.BOLD}API token (hidden):{C.RESET} ").strip()
-            space_key = input(f"  {C.BOLD}Space key{C.RESET} (e.g. DEV): ").strip()
+            extra = input(
+                f"\n  {C.BOLD}Additional space keys?{C.RESET} "
+                f"(comma-separated, Enter to skip): "
+            ).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return
-        if not all([domain, email, token, space_key]):
-            print(f"  {C.RED}❌ All fields are required.{C.RESET}")
-            return
-        save_confluence_config(domain, email, space_key)
-        save_confluence_token(token)
+        if extra:
+            additional = [p.strip() for p in extra.split(",") if p.strip()]
+            space_keys = resolve_sync_space_keys(list(space_keys) + additional)
+            save_confluence_config(email, space_keys=space_keys, domain=domain)
 
+    print(f"\n  {C.DIM}Syncing {len(space_keys)} space(s): {', '.join(space_keys)}{C.RESET}")
     print()
     try:
-        count = sync_confluence(domain, email, token, space_key)
+        count = sync_confluence_spaces(domain, email, token, space_keys)
     except (ValueError, RuntimeError) as exc:
         print(f"\n  {C.RED}❌ {exc}{C.RESET}\n")
         return
-    print(f"\n  {C.GREEN}✓ Synced {count} page{'s' if count != 1 else ''} from Confluence. Run  nova ask  to search them.{C.RESET}\n")
+    print(
+        f"\n  {C.GREEN}✓ Synced {count} page{'s' if count != 1 else ''} to local index.{C.RESET}  "
+        f"{C.DIM}(nova ask uses live REST search){C.RESET}\n"
+    )
 
 
 def cmd_ask(config, query=None):
     """nova ask [question] / nova -a [question] — Confluence search + AI answer."""
-    ai_config = get_active_ai_config()
-    if not ai_config:
-        print(f"  {C.RED}❌ No AI provider configured. Run:  nova add-llm{C.RESET}")
-        return
-    if not query or not query.strip():
-        try:
-            query = input(f"  {C.BOLD}Your question:{C.RESET} ").strip()
-        except (EOFError, KeyboardInterrupt):
+    t0 = time.monotonic()
+    try:
+        ai_config = get_active_ai_config()
+        if not ai_config:
+            print(f"  {C.RED}❌ No AI provider configured. Run:  nova add-llm{C.RESET}")
             return
-    if not query:
-        print(f"  {C.YELLOW}⚠  No question entered.{C.RESET}")
-        return
+        if not query or not query.strip():
+            try:
+                query = input(f"  {C.BOLD}Your question:{C.RESET} ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+        if not query:
+            print(f"  {C.YELLOW}⚠  No question entered.{C.RESET}")
+            return
 
-    confluence_results = []
-    if confluence_index_exists():
-        print(f"\n  {C.CYAN}🔍 Searching Confluence...{C.RESET}")
-        confluence_results = search_confluence(query, top_n=3)
+        confluence_results = []
+        if confluence_credentials_ready():
+            print(f"\n  {C.CYAN}🔍 Searching Confluence...{C.RESET}")
+            try:
+                confluence_results = search_confluence(query, top_n=5)
+            except RuntimeError as exc:
+                print(f"  {C.RED}❌ {exc}{C.RESET}\n")
+                return
+            if confluence_results:
+                n = len(confluence_results)
+                print(f"\n  {C.GREEN}📄 Found {n} page{'s' if n != 1 else ''}:{C.RESET}")
+                for hit in confluence_results:
+                    title = hit.get("title") or "Untitled"
+                    print(f"     {C.BOLD}•{C.RESET} {title}")
+                print()
+
         if confluence_results:
-            print(f"\n  {C.GREEN}📄 Found in Confluence:{C.RESET}")
-            for hit in confluence_results:
-                title = hit.get("title") or "Untitled"
-                url = hit.get("url") or ""
-                print(f"     {C.BOLD}•{C.RESET} {title} — {C.DIM}{url}{C.RESET}")
+            excerpts = format_confluence_context(confluence_results)
+            prompt = _AI_CONFLUENCE_ASK_PROMPT.format(
+                confluence_excerpts=excerpts,
+                question=query.strip(),
+            )
+            print(f"  {C.CYAN}🤖 Answering with Confluence context...{C.RESET}\n")
+            answer = call_ai_ask_stream(prompt, ai_config)
+        else:
+            print(f"  {C.CYAN}🤖 Asking AI...{C.RESET}\n")
+            answer = call_ai_ask_stream(
+                _AI_ASK_PROMPT.format(query=query.strip()),
+                ai_config,
+            )
+
+        if not answer:
+            print(f"  {C.RED}No response from AI.{C.RESET}\n")
+        else:
             print()
-
-    if confluence_results:
-        excerpts = format_confluence_context(confluence_results)
-        prompt = _AI_CONFLUENCE_ASK_PROMPT.format(
-            confluence_excerpts=excerpts,
-            question=query.strip(),
-        )
-        print(f"  {C.CYAN}🤖 Asking AI with Confluence context...{C.RESET}\n")
-        answer = call_ai_ask_stream(prompt, ai_config)
-    else:
-        print(f"  {C.CYAN}🤖 Asking AI...{C.RESET}\n")
-        answer = call_ai_ask_stream(
-            _AI_ASK_PROMPT.format(query=query.strip()),
-            ai_config,
-        )
-
-    if not answer:
-        print(f"  {C.RED}No response from AI.{C.RESET}\n")
-    else:
-        print()
+    finally:
+        _print_done_footer(t0)
 
 
 # ── nova kb list ─────────────────────────────────────────────────────────────
@@ -1789,8 +1874,8 @@ def cmd_kb_rm(entry_id):
 
 def cmd_search(config, query=None):
     """nova search [query] — Ask anything; KB first, AI fallback."""
-    kb_path = get_active_kb_path()
-    if not kb_path or not os.path.isdir(kb_path):
+    kb_path = ensure_active_kb_ready()
+    if not kb_path:
         print(f"  {C.RED}❌ Active KB not configured. Run:  nova setup{C.RESET}")
         return
 
@@ -1832,7 +1917,7 @@ def cmd_search(config, query=None):
     # No KB match — ask AI
     ai_config = get_active_ai_config()
     if not ai_config:
-        print(f"  {C.YELLOW}No KB matches and no AI configured. Run:  nova setup{C.RESET}")
+        print(f"  {C.YELLOW}⚠  No KB matches. No AI configured — run  nova add-llm  for AI fallback.{C.RESET}")
         return
 
     print(f"  {C.CYAN}⟳ Not in KB — asking AI...{C.RESET}")
@@ -2009,17 +2094,54 @@ def cmd_fresh():
 
 # ── nova help ────────────────────────────────────────────────────────────────
 
+def _print_nova_commands_quick_ref():
+    """Compact list of every nova subcommand (shown for nova / nova help)."""
+    groups = [
+        ("Support", (
+            "nova up",
+            "nova search [q]",
+            "nova ask  ·  nova -a [q]",
+        )),
+        ("Knowledge", (
+            "nova add",
+            "nova kb list  ·  rm  ·  path",
+            "nova add-kb  ·  use-kb",
+        )),
+        ("Confluence", (
+            "nova csetup",
+            "nova csync  ·  nova csync -r",
+        )),
+        ("AI / LLM", (
+            "nova setup",
+            "nova add-llm  ·  use <nick>  ·  set-provider",
+            "nova model  ·  apikey  ·  test",
+        )),
+        ("System", (
+            "nova list  ·  config",
+            "nova update  ·  nova update --pull  ·  nova update --setup",
+            "nova install-hooks  ·  version  ·  ano  ·  fresh  ·  help",
+        )),
+    ]
+    print(f"  {C.ORANGE}{C.BOLD}Available commands{C.RESET}\n")
+    for label, cmds in groups:
+        print(f"  {C.BOLD}{label}{C.RESET}")
+        for line in cmds:
+            print(f"    {C.CYAN}{line}{C.RESET}")
+        print()
+
+
 def cmd_help():
     """nova help — Print full docs (table + Active Environment). Prompts for setup if first run."""
     print(BANNER)
-    print(f"  {C.ORANGE}{C.BOLD}Commands{C.RESET}\n")
+    _print_nova_commands_quick_ref()
+    print(f"  {C.ORANGE}{C.BOLD}Command reference{C.RESET}\n")
     # Table format: Category | Command | Description (match reference image)
     sep = f"  {C.ORANGE}{'─' * 78}{C.RESET}"
     print(f"  {C.BOLD}{'Category':<12} {'Command':<24} {'Description':<38}{C.RESET}")
     print(sep)
-    print(f"  {'Support':<12} {'nova up':<24} {'Last terminal error (KB → AI / prompt).':<38}")
-    print(f"  {'':<12} {'nova search [q]':<24} {'KB first, then AI (any question).':<38}")
-    print(f"  {'':<12} {'nova ask / -a':<24} {'Confluence index + AI answer.':<38}")
+    print(f"  {'Support':<12} {'nova up':<24} {'Last error: KB → AI → run fix.':<38}")
+    print(f"  {'':<12} {'nova search [q]':<24} {'KB first, then AI.':<38}")
+    print(f"  {'':<12} {'nova ask / -a [q]':<24} {'Confluence search + AI answer.':<38}")
     print(sep)
     print(f"  {'Knowledge':<12} {'nova add':<24} {'Add one error/solution to KB.':<38}")
     print(f"  {'':<12} {'nova kb list':<24} {'List KB entries (with ID).':<38}")
@@ -2027,8 +2149,9 @@ def cmd_help():
     print(f"  {'':<12} {'nova kb path':<24} {'View or change KB folder.':<38}")
     print(f"  {'':<12} {'nova add-kb / use-kb':<24} {'Add or switch KB source.':<38}")
     print(sep)
-    print(f"  {'Confluence':<12} {'nova sync-confluence':<24} {'Sync space to local index.':<38}")
-    print(f"  {'':<12} {'  --refresh':<24} {'Re-sync (saved credentials).':<38}")
+    print(f"  {'Confluence':<12} {'nova csetup':<24} {'Domain, email, Jira token (Confluence).':<38}")
+    print(f"  {'':<12} {'nova csync':<24} {'Sync Kairos spaces to local index.':<38}")
+    print(f"  {'':<12} {'nova csync -r':<24} {'Re-sync with saved credentials.':<38}")
     print(sep)
     print(f"  {'AI / LLM':<12} {'nova setup':<24} {'Configure KB + AI (wizard).':<38}")
     print(f"  {'':<12} {'nova add-llm':<24} {'Add an AI provider.':<38}")
@@ -2039,11 +2162,23 @@ def cmd_help():
     print(sep)
     print(f"  {'System':<12} {'nova list':<24} {'KB paths + AI profiles.':<38}")
     print(f"  {'':<12} {'nova config':<24} {'Active config + paths.':<38}")
-    print(f"  {'':<12} {'nova update --pull':<24} {'After git pull (keeps settings).':<38}")
+    print(f"  {'':<12} {'nova update':<24} {'Reinstall CLI (keeps ~/.nova).':<38}")
+    print(f"  {'':<12} {'nova update --pull':<24} {'git pull + reinstall (after changes).':<38}")
+    print(f"  {'':<12} {'nova update --setup':<24} {'Reinstall then KB/AI wizard.':<38}")
+    print(f"  {'':<12} {'nova install-hooks':<24} {'Shell hooks + tab completion.':<38}")
+    print(f"  {'':<12} {'nova version':<24} {'Show installed version.':<38}")
     print(f"  {'':<12} {'nova ano':<24} {'Announcements.':<38}")
     print(f"  {'':<12} {'nova fresh / help':<24} {'Reset all / this guide.':<38}")
     print(sep)
-    print(f"  {C.ORANGE}  Workflow{C.RESET}  Run any command → if it fails →  nova up  → KB search → AI fallback")
+    print(f"  {C.ORANGE}  Workflow{C.RESET}  Fail a command →  nova up  → KB → AI.  Company docs →  nova ask")
+    print(
+        f"  {C.ORANGE}  Hooks{C.RESET}     New terminal or  source ~/.bashrc  — check  "
+        f"{C.CYAN}echo $NOVA_SESSION_DIR{C.RESET}"
+    )
+    print(
+        f"  {C.ORANGE}  Updates{C.RESET}    After  git pull  in the repo →  "
+        f"{C.CYAN}nova update --pull{C.RESET}  {C.DIM}(or{C.RESET}  bash update.sh{C.DIM}){C.RESET}"
+    )
     print()
     _active_env()
     # First-time: prompt for setup if no config or no active KB
@@ -2215,7 +2350,7 @@ _NOVA_COMMANDS = frozenset({
     "up", "search", "s", "ask", "-a",
     "add", "kb", "use", "set-provider", "model",
     "apikey", "add-llm", "rm", "add-kb", "rm-kb", "use-kb",
-    "sync-confluence", "syncconfluence",
+    "csetup", "csync",
     "ano", "list", "config", "fresh", "help", "-h", "--help",
     "version", "--version", "-v", "--v",
     "setup", "install-hooks", "update", "test",
@@ -2259,6 +2394,10 @@ _NOVA_COMMAND_ALIASES = {
     "addllm": "add-llm",
     "setprovider": "set-provider",
     "save": "add-llm",
+    "sync-confluence": "csync",
+    "syncconfluence": "csync",
+    "confluence-setup": "csetup",
+    "confluencesetup": "csetup",
     "h": "help",
     "?": "help",
 }
@@ -2376,9 +2515,14 @@ def main():
         cmd_install_hooks()
         return
 
-    if command in ("sync-confluence", "syncconfluence"):
-        do_refresh = "--refresh" in args or "-r" in args
-        cmd_sync_confluence(refresh=do_refresh)
+    if command == "csetup":
+        cmd_csetup()
+        return
+
+    if command == "csync":
+        rest = args[1:]
+        do_refresh = "--refresh" in rest or "-r" in rest
+        cmd_csync(refresh=do_refresh)
         return
 
     if command == "update":

@@ -226,6 +226,25 @@ def get_active_kb_path():
     return kbs.get(active)
 
 
+def ensure_active_kb_ready():
+    """Return active KB path, creating the folder and kb.json if missing (no crash)."""
+    cfg = load_config()
+    if not cfg or not cfg.get("active_kb"):
+        return None
+    kb_path = get_active_kb_path()
+    if not kb_path:
+        return None
+    try:
+        os.makedirs(kb_path, exist_ok=True)
+        kb_file = os.path.join(kb_path, "kb.json")
+        if not os.path.isfile(kb_file):
+            with open(kb_file, "w", encoding="utf-8") as fh:
+                json.dump([], fh, indent=2)
+        return kb_path
+    except OSError:
+        return None
+
+
 def list_all_kbs():
     """Return list of (nickname, path, is_active) tuples."""
     cfg = load_config() or {}
