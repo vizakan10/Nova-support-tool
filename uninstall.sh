@@ -1,5 +1,9 @@
 #!/bin/bash
-# Nova CLI — full uninstall (run from anywhere)
+# Nova CLI — full uninstall (no chmod needed; run from anywhere)
+#
+#   curl -fsSL https://raw.githubusercontent.com/vizakan10/Nova-support-tool/main/uninstall.sh | bash
+#
+#   cd Nova-support-tool && bash uninstall.sh
 
 set -euo pipefail
 

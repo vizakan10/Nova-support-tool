@@ -17,20 +17,36 @@
 
 ## Quick Install
 
-### Method A: Direct (One-liner)
+### One command (recommended)
+
+From anywhere (WSL / Linux) — clones, installs pip package, hooks, and runs `nova setup`:
+
 ```bash
-# In WSL / Linux terminal
-pip install --user git+https://github.com/vizakan10/Nova-support-tool.git
-nova setup
+curl -fsSL https://raw.githubusercontent.com/vizakan10/Nova-support-tool/main/install.sh | bash
 ```
 
-### Method B: Clone & Install (Recommended for WSL)
-If you want to keep the source code or if `pip` is missing:
+Already cloned the repo? No `chmod` needed:
+
 ```bash
-git clone https://github.com/vizakan10/Nova-support-tool.git
 cd Nova-support-tool
-chmod +x install.sh
-./install.sh
+bash install.sh
+```
+
+After install, if `nova up` says hooks are not loaded in this terminal, run once:
+
+```bash
+source ~/.bashrc
+```
+
+(or open a new terminal — hooks load automatically there.)
+
+### Pip only (minimal)
+
+```bash
+pip install --user git+https://github.com/vizakan10/Nova-support-tool.git
+nova setup
+nova install-hooks
+source ~/.bashrc
 ```
 
 kb cloud - https://ifs-my.sharepoint.com/:f:/p/thangaratnam_visakan/IgAck2Z76LdFS5qlRgJ-x2jfAVg8dkVAdlavUg8XG0F-FnA?e=VUPQqB
@@ -236,15 +252,17 @@ OneDrive conflict copies (`kb-DESKTOP-123.json`) are **auto-detected and merged*
 
 ## Uninstallation
 
-You can run the uninstaller **from anywhere** (you don't have to be inside the cloned repo):
+One command from anywhere:
 
 ```bash
-# If you're in the cloned folder:
-chmod +x uninstall.sh
-./uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/vizakan10/Nova-support-tool/main/uninstall.sh | bash
+```
 
-# Or from elsewhere, run the script by path:
-/path/to/Nova-support-tool/uninstall.sh
+Or from a clone (no `chmod` needed):
+
+```bash
+bash uninstall.sh
+# or: bash /path/to/Nova-support-tool/uninstall.sh
 ```
 
 The script will:

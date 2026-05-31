@@ -1,7 +1,10 @@
 #!/bin/bash
-# Nova CLI — one-shot installer
+# Nova CLI — one-shot installer (no chmod needed)
+#
 #   curl -fsSL https://raw.githubusercontent.com/vizakan10/Nova-support-tool/main/install.sh | bash
-#   git clone ... && cd Nova-support-tool && ./install.sh
+#
+#   git clone https://github.com/vizakan10/Nova-support-tool.git
+#   cd Nova-support-tool && bash install.sh
 
 set -euo pipefail
 
@@ -154,10 +157,11 @@ step_ok "Setup complete"
 echo ""
 echo " ✓ Nova installed successfully"
 echo ""
-echo " One-time only: open a new terminal."
-echo " (Hooks load automatically in every terminal after that — nothing to redo tomorrow.)"
+echo " One-time in THIS terminal (if nova up says hooks are not loaded):"
+echo "   source ~/.bashrc"
+echo "   — or open a new terminal (hooks load automatically there)."
 echo ""
-echo " Try it in that new terminal:"
+echo " Try:"
 echo "   python3 -c \"import nosuchmodule\""
 echo "   nova up"
 echo ""
