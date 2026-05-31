@@ -62,6 +62,16 @@ from kb_manager import (
     resolve_conflicts,
     sanitize,
 )
+from confluence_manager import (
+    confluence_index_exists,
+    format_confluence_context,
+    get_confluence_token,
+    load_confluence_config,
+    save_confluence_config,
+    save_confluence_token,
+    search_confluence,
+    sync_confluence,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -733,6 +743,17 @@ You are a concise technical assistant. Answer the following in a clear, short wa
 Question: {query}
 """
 
+_AI_CONFLUENCE_ASK_PROMPT = """\
+You are a technical assistant for a software team. Answer the question using the provided Confluence documentation excerpts. Be specific and cite which document the answer comes from.
+
+Confluence context:
+{confluence_excerpts}
+
+Question: {question}
+
+If the documentation doesn't contain enough information, say so clearly and give a general answer.
+"""
+
 
 def call_ai_ask(query, ai_config):
     """Call AI with a free-form question. Returns response text or None."""
@@ -772,6 +793,85 @@ def call_ai_ask(query, ai_config):
     if provider == "claude":
         return (data.get("content") or [{}])[0].get("text", "")
     return (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+
+
+def call_ai_ask_stream(prompt, ai_config, *, max_tokens=800):
+    """Stream a free-form AI answer to stdout. Returns full text or None."""
+    if not prompt or not ai_config:
+        return None
+    provider = ai_config.get("provider", "")
+    api_key = ai_config.get("api_key", "")
+    model = ai_config.get("model", "")
+    endpoint = ai_config.get("endpoint", "")
+    if not all([provider, api_key, model, endpoint]):
+        return None
+
+    if provider == "claude":
+        body = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "stream": True,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+    else:
+        body = {
+            "model": model,
+            "stream": True,
+            "messages": [
+                {"role": "system", "content": "You are a concise technical assistant."},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.3,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "Authorization": f"Bearer {api_key}",
+        }
+
+    headers["User-Agent"] = NOVA_HTTP_USER_AGENT
+    payload = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(endpoint, data=payload, headers=headers)
+
+    full_parts = []
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or line.startswith("event:"):
+                    continue
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                piece = _extract_stream_delta(chunk, provider)
+                if not piece:
+                    continue
+                full_parts.append(piece)
+                _stream_print_words(piece)
+        print()
+    except urllib.error.HTTPError as exc:
+        print()
+        msg = exc.read().decode("utf-8", errors="replace")[:200]
+        print(f"  {C.RED}⚠  AI API error ({exc.code}): {msg}{C.RESET}")
+        return None
+    except Exception as exc:
+        print()
+        print(f"  {C.RED}⚠  AI request failed: {exc}{C.RESET}")
+        return None
+
+    return "".join(full_parts).strip() or None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1556,8 +1656,48 @@ def cmd_install_hooks():
 
 # ── nova ask / nova -a ───────────────────────────────────────────────────────
 
+def cmd_sync_confluence(refresh=False):
+    """nova sync-confluence [--refresh] — Sync Confluence space to local index."""
+    if refresh:
+        cfg = load_confluence_config()
+        if not cfg:
+            print(f"  {C.RED}❌ No saved Confluence config. Run:  nova sync-confluence{C.RESET}")
+            return
+        token = get_confluence_token()
+        if not token:
+            print(f"  {C.RED}❌ Confluence API token missing in secrets. Run:  nova sync-confluence{C.RESET}")
+            return
+        domain = cfg["domain"]
+        email = cfg["email"]
+        space_key = cfg["space_key"]
+    else:
+        print(f"\n  {C.ORANGE}{C.BOLD}Confluence sync{C.RESET}\n")
+        try:
+            domain = input(f"  {C.BOLD}Confluence domain{C.RESET} (e.g. yourcompany.atlassian.net): ").strip()
+            email = input(f"  {C.BOLD}Email:{C.RESET} ").strip()
+            import getpass as gp
+            token = gp.getpass(f"  {C.BOLD}API token (hidden):{C.RESET} ").strip()
+            space_key = input(f"  {C.BOLD}Space key{C.RESET} (e.g. DEV): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not all([domain, email, token, space_key]):
+            print(f"  {C.RED}❌ All fields are required.{C.RESET}")
+            return
+        save_confluence_config(domain, email, space_key)
+        save_confluence_token(token)
+
+    print()
+    try:
+        count = sync_confluence(domain, email, token, space_key)
+    except (ValueError, RuntimeError) as exc:
+        print(f"\n  {C.RED}❌ {exc}{C.RESET}\n")
+        return
+    print(f"\n  {C.GREEN}✓ Synced {count} page{'s' if count != 1 else ''} from Confluence. Run  nova ask  to search them.{C.RESET}\n")
+
+
 def cmd_ask(config, query=None):
-    """nova ask [question] / nova -a [question] — Ask Nova AI a direct question."""
+    """nova ask [question] / nova -a [question] — Confluence search + AI answer."""
     ai_config = get_active_ai_config()
     if not ai_config:
         print(f"  {C.RED}❌ No AI provider configured. Run:  nova add-llm{C.RESET}")
@@ -1570,12 +1710,38 @@ def cmd_ask(config, query=None):
     if not query:
         print(f"  {C.YELLOW}⚠  No question entered.{C.RESET}")
         return
-    print(f"\n  {C.CYAN}🤖 Asking AI...{C.RESET}\n")
-    answer = call_ai_ask(query, ai_config)
-    if answer:
-        print(f"  {C.GREEN}{answer.strip()}{C.RESET}\n")
+
+    confluence_results = []
+    if confluence_index_exists():
+        print(f"\n  {C.CYAN}🔍 Searching Confluence...{C.RESET}")
+        confluence_results = search_confluence(query, top_n=3)
+        if confluence_results:
+            print(f"\n  {C.GREEN}📄 Found in Confluence:{C.RESET}")
+            for hit in confluence_results:
+                title = hit.get("title") or "Untitled"
+                url = hit.get("url") or ""
+                print(f"     {C.BOLD}•{C.RESET} {title} — {C.DIM}{url}{C.RESET}")
+            print()
+
+    if confluence_results:
+        excerpts = format_confluence_context(confluence_results)
+        prompt = _AI_CONFLUENCE_ASK_PROMPT.format(
+            confluence_excerpts=excerpts,
+            question=query.strip(),
+        )
+        print(f"  {C.CYAN}🤖 Asking AI with Confluence context...{C.RESET}\n")
+        answer = call_ai_ask_stream(prompt, ai_config)
     else:
+        print(f"  {C.CYAN}🤖 Asking AI...{C.RESET}\n")
+        answer = call_ai_ask_stream(
+            _AI_ASK_PROMPT.format(query=query.strip()),
+            ai_config,
+        )
+
+    if not answer:
         print(f"  {C.RED}No response from AI.{C.RESET}\n")
+    else:
+        print()
 
 
 # ── nova kb list ─────────────────────────────────────────────────────────────
@@ -1853,13 +2019,16 @@ def cmd_help():
     print(sep)
     print(f"  {'Support':<12} {'nova up':<24} {'Last terminal error (KB → AI / prompt).':<38}")
     print(f"  {'':<12} {'nova search [q]':<24} {'KB first, then AI (any question).':<38}")
-    print(f"  {'':<12} {'nova ask / -a':<24} {'Direct AI question (no KB).':<38}")
+    print(f"  {'':<12} {'nova ask / -a':<24} {'Confluence index + AI answer.':<38}")
     print(sep)
     print(f"  {'Knowledge':<12} {'nova add':<24} {'Add one error/solution to KB.':<38}")
     print(f"  {'':<12} {'nova kb list':<24} {'List KB entries (with ID).':<38}")
     print(f"  {'':<12} {'nova kb rm <ID>':<24} {'Delete KB entry by ID.':<38}")
     print(f"  {'':<12} {'nova kb path':<24} {'View or change KB folder.':<38}")
     print(f"  {'':<12} {'nova add-kb / use-kb':<24} {'Add or switch KB source.':<38}")
+    print(sep)
+    print(f"  {'Confluence':<12} {'nova sync-confluence':<24} {'Sync space to local index.':<38}")
+    print(f"  {'':<12} {'  --refresh':<24} {'Re-sync (saved credentials).':<38}")
     print(sep)
     print(f"  {'AI / LLM':<12} {'nova setup':<24} {'Configure KB + AI (wizard).':<38}")
     print(f"  {'':<12} {'nova add-llm':<24} {'Add an AI provider.':<38}")
@@ -2046,6 +2215,7 @@ _NOVA_COMMANDS = frozenset({
     "up", "search", "s", "ask", "-a",
     "add", "kb", "use", "set-provider", "model",
     "apikey", "add-llm", "rm", "add-kb", "rm-kb", "use-kb",
+    "sync-confluence", "syncconfluence",
     "ano", "list", "config", "fresh", "help", "-h", "--help",
     "version", "--version", "-v", "--v",
     "setup", "install-hooks", "update", "test",
@@ -2204,6 +2374,11 @@ def main():
 
     if command == "install-hooks":
         cmd_install_hooks()
+        return
+
+    if command in ("sync-confluence", "syncconfluence"):
+        do_refresh = "--refresh" in args or "-r" in args
+        cmd_sync_confluence(refresh=do_refresh)
         return
 
     if command == "update":

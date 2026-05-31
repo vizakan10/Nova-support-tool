@@ -20,7 +20,7 @@ setup(
     version="2.0.0",
     description="Nova CLI — support tool for collaborative error resolution",
     author="IFS",
-    py_modules=["nova_cli", "config", "kb_manager"],
+    py_modules=["nova_cli", "config", "kb_manager", "confluence_manager"],
     entry_points={
         "console_scripts": [
             "nova=nova_cli:main",

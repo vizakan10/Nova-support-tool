@@ -180,6 +180,24 @@ else
     step_ok "Setup complete"
 fi
 
+# ── 7b. Optional Confluence sync ───────────────────────────────────────────
+_confluence_configured() {
+    [[ -f "$HOME/.nova/confluence_config.json" ]]
+}
+
+echo ""
+if ! _confluence_configured; then
+    read -r -p "Would you like to connect Confluence for document search? [y/N]: " connect_cf
+    if [[ "${connect_cf:-}" =~ ^[Yy]$ ]]; then
+        echo ""
+        if nova sync-confluence; then
+            step_ok "Confluence index ready"
+        else
+            echo "  ⚠  Confluence sync skipped or failed — run  nova sync-confluence  later."
+        fi
+    fi
+fi
+
 # ── 8. Done ─────────────────────────────────────────────────────────────────
 echo ""
 echo " ✓ Nova installed successfully"
