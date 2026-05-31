@@ -89,44 +89,41 @@ Run **`nova help`** to see the full command list and **Active Environment** (Con
 ### Support
 | Command | Description |
 |---------|-------------|
-| `nova up` | Solve last terminal error (KB → AI) |
-| `nova fix` | Paste error and get instant solution |
-| `nova ask` / `nova -a [question]` | Ask Nova AI a direct question |
-| `nova solve` | Review history and add a custom fix |
-| `nova log [n]` | Show last n terminal entries |
+| `nova up` | Last terminal error (KB → AI / manual prompt) |
+| `nova search [q]` | KB first, then AI |
+| `nova ask` / `nova -a [question]` | Direct AI question (no KB) |
 
 ### Knowledge (KB = kb.json)
 | Command | Description |
 |---------|-------------|
-| `nova add` | Manually add one error pattern |
-| `nova kb list` | List all solutions (table with ID) |
-| `nova kb rm <ID>` | Delete solution by table ID |
-| `nova kb search [query]` | Manual lookup test |
-| `nova kb path [path]` | View or update KB storage path |
-| `nova add-kb <nick> <path>` | Register a new KB folder |
-| `nova rm-kb <nick>` / `nova use-kb <nick>` | Unlink or switch KB |
-| `nova lk` / `nova cur-kb` | List KBs, show current |
+| `nova add` | Add one error/solution to KB |
+| `nova kb list` | List KB entries (with ID) |
+| `nova kb rm <ID>` | Delete entry by ID |
+| `nova kb path [path]` | View or change KB folder |
+| `nova add-kb` / `use-kb` / `rm-kb` | Extra KB sources |
 
 ### AI / LLM
 | Command | Description |
 |---------|-------------|
-| `nova save <nick>` | Save current LLM setup as profile |
-| `nova use <nick>` | Switch to saved profile |
-| `nova providers` | List supported AI hosts |
-| `nova set-provider` | Change AI host (interactive) |
-| `nova model <m>` | Update model for active provider |
-| `nova apikey [k]` | Save provider API key securely |
-| `nova add-llm` | Add new AI provider |
-| `nova rm <nick>` / `nova lp` / `nova cur` / `nova test` | Remove, list, current, test |
+| `nova setup` | Configure KB + AI (wizard) |
+| `nova add-llm` | Add AI provider |
+| `nova use <nick>` | Switch AI profile |
+| `nova set-provider` | Pick profile (interactive) |
+| `nova model <m>` / `nova apikey [k]` | Model / API key |
+| `nova test` | Test AI connection |
+| `nova rm <nick>` | Remove AI profile |
 
 ### System
 | Command | Description |
 |---------|-------------|
-| `nova list` | Show all paths and profile nicknames |
-| `nova init` | Run configuration wizard (alias: setup) |
-| `nova config` | Show full config + Active Environment |
-| `nova fresh` | Wipe all settings and restart |
-| `nova version` / `nova secrets-path` / `nova help` | Version, secrets path, help |
+| `nova list` | KB paths + AI profiles |
+| `nova config` | Active config + paths |
+| `nova update --pull` | After `git pull` (keeps settings) |
+| `nova ano` | Announcements |
+| `nova fresh` | Wipe settings |
+| `nova help` / `nova version` | Help / version |
+
+Old names (`init`, `fix`, `lp`, `lk`, …) still auto-redirect with a short notice.
 
 ## Usage Examples
 
@@ -185,15 +182,15 @@ $ nova add-llm
   ✅ Provider 'groq-llam' added and set as active.
 ```
 
-### `nova lp` — List Providers
+### `nova list` — Paths and profiles
 
 ```bash
-$ nova lp
+$ nova list
 
-  🤖 Configured AI Providers
-
-  ● active  groq-llam   (groq/llama-3.1-8b-instant)
-  ○         openai-gpt4 (openai/gpt-4o)
+  Knowledge Bases:
+  ● main  /path/to/Nova-KB
+  AI Profiles:
+  ● groq-llam  (groq/llama-3.1-8b-instant)
 ```
 
 ### `nova use <provider>` — Switch Provider

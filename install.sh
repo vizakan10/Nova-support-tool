@@ -144,18 +144,47 @@ else
     step_ok "Added hook source line to ~/.bashrc"
 fi
 
-# ── 7. Interactive setup (KB + AI) ──────────────────────────────────────────
+# ── 7. Interactive setup (KB + AI) — first install only ─────────────────────
+_nova_already_configured() {
+    python3 - <<'PY' 2>/dev/null
+import json
+import os
+import sys
+
+path = os.path.expanduser("~/.nova/config.json")
+if not os.path.isfile(path):
+    sys.exit(1)
+try:
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except (json.JSONDecodeError, OSError):
+    sys.exit(1)
+sys.exit(0 if cfg.get("active_kb") else 1)
+PY
+}
+
 echo ""
-echo "▶ Running Nova setup (KB path + AI provider)..."
-echo ""
-if ! nova setup; then
-    die "nova setup failed or was cancelled. Run 'nova setup' to try again."
+if _nova_already_configured; then
+    step_ok "Existing ~/.nova config found — setup skipped"
+    echo ""
+    echo "  You already have KB/AI settings. After git pull, use:"
+    echo "    bash update.sh"
+    echo "  To change settings:"
+    echo "    nova setup"
+else
+    echo "▶ Running Nova setup (KB path + AI provider)..."
+    echo ""
+    if ! nova setup; then
+        die "nova setup failed or was cancelled. Run 'nova setup' to try again."
+    fi
+    step_ok "Setup complete"
 fi
-step_ok "Setup complete"
 
 # ── 8. Done ─────────────────────────────────────────────────────────────────
 echo ""
 echo " ✓ Nova installed successfully"
+echo ""
+echo "  Updates (git pull):  bash update.sh   or   nova update --pull"
 echo ""
 echo " One-time in THIS terminal (if nova up says hooks are not loaded):"
 echo "   source ~/.bashrc"
