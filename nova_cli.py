@@ -74,6 +74,7 @@ from confluence_manager import (
     build_confluence_index,
     confluence_credentials_ready,
     confluence_index_exists,
+    ensure_local_index,
     format_confluence_context,
     get_index_page_by_id,
     get_jira_token,
@@ -1880,7 +1881,11 @@ def cmd_ask(config, query=None):
         ai_pages = []
         use_confluence = False
 
-        if confluence_index_exists():
+        has_index = confluence_index_exists()
+        if not has_index and confluence_credentials_ready():
+            has_index = ensure_local_index(interactive=True)
+
+        if has_index:
             print(f"\n  {C.CYAN}🔍 Searching local {DEFAULT_INDEX_SPACE} index...{C.RESET}")
             ranked = search_local_index(query, top_n=SEARCH_LOCAL_TOP)
             if ranked:
@@ -1910,8 +1915,9 @@ def cmd_ask(config, query=None):
                 print(f"  {C.YELLOW}⚠  No matches in local index.{C.RESET}\n")
         elif confluence_credentials_ready():
             print(
-                f"\n  {C.YELLOW}⚠  No local index. Run:  nova csetup  or  nova csync -r{C.RESET}\n"
+                f"\n  {C.YELLOW}⚠  No local index — answer is from AI only (not IFS Confluence).{C.RESET}"
             )
+            print(f"  {C.DIM}   Build index:  nova csync -r{C.RESET}\n")
         else:
             print(f"  {C.DIM}Confluence not configured — AI only.{C.RESET}\n")
 

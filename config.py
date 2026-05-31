@@ -51,6 +51,7 @@ AI_PROVIDERS = {
     "ollama": {
         "endpoint": "http://localhost:11434/v1/chat/completions",
         "models": ["llama3", "mistral", "codellama", "Other"],
+        
     },
     "google": {
         "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",

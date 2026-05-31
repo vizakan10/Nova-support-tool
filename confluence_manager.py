@@ -162,6 +162,42 @@ def confluence_index_exists():
     return bool(data and data.get("pages"))
 
 
+def ensure_local_index(interactive=True):
+    """
+    Return True if a usable local index exists.
+    If credentials are saved but index is missing, optionally prompt to build it.
+    """
+    if confluence_index_exists():
+        return True
+    if not confluence_credentials_ready():
+        return False
+    if not interactive:
+        return False
+    cfg = load_confluence_config()
+    token = get_jira_token()
+    if not cfg or not token:
+        return False
+    try:
+        ans = input(
+            f"\n  {DEFAULT_INDEX_SPACE} index not built yet. "
+            f"Scan all {DEFAULT_INDEX_SPACE} pages now? [Y/n]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if ans not in ("", "y", "yes"):
+        return False
+    print(f"\n  ▶ Building local RAG index ({DEFAULT_INDEX_SPACE})...\n")
+    try:
+        build_confluence_index(
+            cfg["domain"], cfg["email"], token, space_key=DEFAULT_INDEX_SPACE
+        )
+        return confluence_index_exists()
+    except (ValueError, RuntimeError) as exc:
+        print(f"  ⚠ Index build failed: {exc}")
+        return False
+
+
 def _auth_header(email, token):
     raw = f"{email}:{token}".encode("utf-8")
     return base64.b64encode(raw).decode("ascii")
@@ -431,8 +467,12 @@ def index_stale_message():
 
 def _score_rag_page(page, query_words, phrase):
     title_l = (page.get("title") or "").lower()
-    text_l = (page.get("full_text") or page.get("text") or "").lower()
+    text_l = (
+        page.get("full_text") or page.get("text") or page.get("summary") or ""
+    ).lower()
     keywords = [k.lower() for k in (page.get("keywords") or [])]
+    if not keywords and text_l:
+        keywords = _tokenize_for_keywords(text_l[:2000])
     score = 0
     for w in query_words:
         if w in title_l:
@@ -483,7 +523,9 @@ def pages_for_ai_context(ranked_pages, top_n=_SEARCH_AI_TOP):
     """Top pages using stored full_text (no API)."""
     out = []
     for page in ranked_pages[:top_n]:
-        full_text = page.get("full_text") or page.get("text") or page.get("summary") or ""
+        full_text = (
+            page.get("full_text") or page.get("text") or page.get("summary") or ""
+        )
         text = full_text[:_AI_DOC_CHAR_LIMIT] if len(full_text) > _AI_DOC_CHAR_LIMIT else full_text
         out.append({
             "id": page.get("id"),
