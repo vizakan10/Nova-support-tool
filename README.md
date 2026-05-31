@@ -40,6 +40,27 @@ source ~/.bashrc
 
 (or open a new terminal — hooks load automatically there.)
 
+### Update after `git pull` (no uninstall)
+
+Your `~/.nova` settings (KB path, AI keys, providers) are **kept**. One command from the repo:
+
+```bash
+cd Nova-support-tool
+git pull
+bash update.sh
+```
+
+Or from anywhere (if Nova is already installed):
+
+```bash
+cd Nova-support-tool
+nova update --pull
+```
+
+Refresh hooks in this terminal if needed: `source ~/.bashrc`
+
+To change KB or AI settings after an update: `nova update --setup` or `bash update.sh --setup`
+
 ### Pip only (minimal)
 
 ```bash

@@ -1,5 +1,6 @@
 *.sh text eol=lf
 install.sh executable
 uninstall.sh executable
+update.sh executable
 *.py text eol=lf
 *.json text eol=lf

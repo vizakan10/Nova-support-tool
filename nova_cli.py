@@ -1287,6 +1287,104 @@ def cmd_setup():
         _print_hooks_activation_reminder(fresh_install=False)
 
 
+def cmd_update(*, git_pull=False, reconfigure=False):
+    """
+    nova update — Reinstall from repo after git pull (keeps ~/.nova settings).
+
+    Options:
+      --pull    git pull --ff-only in the repo first
+      --setup   run nova setup afterward to change KB / AI settings
+    """
+    print(f"\n  {C.BLUE}{C.BOLD}🔄 Nova — Update / reinstall{C.RESET}\n")
+
+    repo = _find_nova_repo_root()
+    if not repo:
+        print(f"  {C.RED}❌ Could not find Nova repo (need setup.py + nova_cli.py).{C.RESET}")
+        print(f"  {C.DIM}   cd into your clone and run:{C.RESET}  {C.CYAN}bash update.sh{C.RESET}")
+        print(
+            f"  {C.DIM}   Or set:{C.RESET}  {C.CYAN}export NOVA_SRC=/path/to/Nova-support-tool{C.RESET}"
+        )
+        return
+
+    print(f"  {C.DIM}Repo:{C.RESET} {repo}")
+
+    if git_pull:
+        git_dir = os.path.join(repo, ".git")
+        if not os.path.isdir(git_dir):
+            print(f"  {C.YELLOW}⚠  Not a git repo — skipping pull.{C.RESET}")
+        else:
+            print(f"  {C.DIM}▶ git pull --ff-only ...{C.RESET}")
+            try:
+                proc = subprocess.run(
+                    ["git", "-C", repo, "pull", "--ff-only"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                print(f"  {C.RED}❌ git pull failed: {exc}{C.RESET}")
+                return
+            if proc.returncode != 0:
+                err = (proc.stderr or proc.stdout or "").strip()
+                print(f"  {C.RED}❌ git pull failed.{C.RESET}")
+                if err:
+                    print(f"  {C.DIM}   {err[:300]}{C.RESET}")
+                return
+            out = (proc.stdout or "").strip()
+            if out:
+                for line in out.splitlines():
+                    print(f"  {C.DIM}   {line}{C.RESET}")
+            print(f"  {C.GREEN}✅ Git pull OK{C.RESET}")
+
+    print(f"  {C.DIM}▶ pip install -e . ...{C.RESET}")
+    pip_args = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--user",
+        "--break-system-packages",
+        "-e",
+        repo,
+    ]
+    try:
+        proc = subprocess.run(pip_args, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print(f"  {C.RED}❌ pip install timed out.{C.RESET}")
+        return
+    if proc.returncode != 0:
+        pip_args = [sys.executable, "-m", "pip", "install", "--user", "-e", repo]
+        proc = subprocess.run(pip_args, capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        print(f"  {C.RED}❌ pip install failed.{C.RESET}")
+        if err:
+            for line in err.splitlines()[-8:]:
+                print(f"  {C.DIM}   {line}{C.RESET}")
+        return
+    print(f"  {C.GREEN}✅ Nova CLI reinstalled{C.RESET}  {C.DIM}(v{VERSION}){C.RESET}")
+
+    print(f"  {C.DIM}▶ Refreshing shell hooks ...{C.RESET}")
+    cmd_install_hooks()
+
+    cfg = load_config()
+    if cfg and cfg.get("active_kb"):
+        print(f"  {C.GREEN}✅ Settings kept{C.RESET}  {C.DIM}(~/.nova — KB + AI unchanged){C.RESET}")
+    else:
+        print(f"  {C.YELLOW}⚠  Not fully configured.{C.RESET}  {C.DIM}Run  nova setup{C.RESET}")
+
+    if reconfigure:
+        print()
+        cmd_setup()
+    else:
+        print(
+            f"  {C.DIM}   Change KB/AI later:{C.RESET}  "
+            f"{C.CYAN}nova setup{C.RESET}  {C.DIM}or{C.RESET}  {C.CYAN}nova update --setup{C.RESET}"
+        )
+
+    print()
+
+
 # ── nova add-llm ─────────────────────────────────────────────────────────────
 
 def cmd_add_llm():
@@ -1477,16 +1575,42 @@ def cmd_secrets_path():
     print()
 
 
+def _find_nova_repo_root():
+    """Find Nova-support-tool repo (for pip install -e after git pull)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.environ.get("NOVA_SRC", "").strip(),
+        os.path.join(os.path.expanduser("~"), ".nova", "nova-src"),
+        here,
+        os.getcwd(),
+    ]
+    seen = set()
+    for path in candidates:
+        if not path:
+            continue
+        abspath = os.path.abspath(path)
+        if abspath in seen:
+            continue
+        seen.add(abspath)
+        if os.path.isfile(os.path.join(abspath, "setup.py")) and os.path.isfile(
+            os.path.join(abspath, "nova_cli.py")
+        ):
+            return abspath
+    return None
+
+
 def _find_nova_hooks_source():
     """Locate nova_hooks.sh from repo, editable install, or pip data_files."""
     here = os.path.dirname(os.path.abspath(__file__))
+    repo = _find_nova_repo_root()
     candidates = [
         os.path.join(here, "nova_hooks.sh"),
+        os.path.join(repo, "nova_hooks.sh") if repo else "",
         os.path.join(sys.prefix, "share", "nova-cli", "nova_hooks.sh"),
         os.path.join(os.path.expanduser("~/.local"), "share", "nova-cli", "nova_hooks.sh"),
     ]
     for path in candidates:
-        if os.path.isfile(path):
+        if path and os.path.isfile(path):
             return path
     return None
 
@@ -2059,6 +2183,8 @@ def cmd_help():
     print(f"  {'':<12} {'nova init':<24} {'Run the configuration wizard.':<38}")
     print(f"  {'':<12} {'nova config':<24} {'Show full active configuration.':<38}")
     print(f"  {'':<12} {'nova fresh':<24} {'Wipe all settings, start over.':<38}")
+    print(f"  {'':<12} {'nova update':<24} {'Reinstall after git pull (keeps settings).':<38}")
+    print(f"  {'':<12} {'nova update --pull':<24} {'git pull + reinstall + refresh hooks.':<38}")
     print(f"  {'':<12} {'nova help':<24} {'Show this guide.':<38}")
     print(sep)
     print(f"  {C.ORANGE}  Workflow{C.RESET}  Run any command → if it fails →  nova up  → KB search → AI fallback")
@@ -2293,6 +2419,12 @@ def main():
 
     if command == "install-hooks":
         cmd_install_hooks()
+        return
+
+    if command in ("update", "upgrade", "reinstall"):
+        do_pull = "--pull" in args or "-p" in args
+        do_setup = "--setup" in args
+        cmd_update(git_pull=do_pull, reconfigure=do_setup)
         return
 
     if command == "debug-session":
