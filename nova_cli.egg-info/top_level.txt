@@ -1,3 +1,0 @@
-config
-kb_manager
-nova_cli
